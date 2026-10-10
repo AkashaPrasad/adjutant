@@ -8,7 +8,7 @@
 [![CI](https://github.com/AkashaPrasad/adjutant/actions/workflows/ci.yml/badge.svg)](https://github.com/AkashaPrasad/adjutant/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-[Live console](https://adjutant.spacesdrive.cc) · [API](https://api.adjutant.spacesdrive.cc/docs) · [Deployment](docs/DEPLOYMENT.md)
+[Live console](https://adjutant.spacesdrive.cc) · [API](https://api.adjutant.spacesdrive.cc/docs) · [Demo runbook](instructions.md) · [Pitch](docs/PITCH.md) · [API reference](docs/API.md) · [Design spec](docs/DESIGN.md) · [Deployment](docs/DEPLOYMENT.md)
 
 </div>
 
@@ -27,13 +27,17 @@ Agents can now decide to act. What fails is everything between that decision and
 
 Planning and done-criteria judgment use **Meta Muse Spark 1.3 Contributor** (`muse-spark-1.3-contributor`). Policy, taint, hashing and the ledger are deterministic code.
 
+## Demo
+
+Open the [live console](https://adjutant.spacesdrive.cc), click **Reset demo data**, then press `d` for the demo script. Five scripted scenarios cover one failure mode each: batched approval, injected recipient (taint block), auto-approval, false "done", and exactly-once replay. The presenter runbook is in [instructions.md](instructions.md).
+
 ## Repository layout
 
 ```
-backend/    FastAPI service: gate, policy, effect ledger, sandbox tool adapters, Muse client
-frontend/   Vite + React console: new run, plan-diff review, runs, effect ledger
-infra/      AWS host bootstrap + provisioning, Cloudflare DNS/Pages scripts, signed deploy
-docs/       Architecture and deployment notes
+backend/    FastAPI service: gate, policy, effect ledger, sandbox tool adapters, Muse client, demo scenarios
+frontend/   Vite + React console: overview, run review, runs, effects ledger, systems, audit, explainer
+infra/      AWS host bootstrap + provisioning, Cloudflare DNS/Pages scripts, signed deploy (local + CI)
+docs/       API reference, design spec, pitch, research, deployment notes
 .github/    CI and production deploy workflows
 ```
 
