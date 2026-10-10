@@ -10,6 +10,8 @@ exec > >(tee -a /var/log/adjutant-bootstrap.log) 2>&1
 API_DOMAIN="${API_DOMAIN:-api.adjutant.spacesdrive.cc}"
 REPO_URL="${REPO_URL:-https://github.com/AkashaPrasad/adjutant.git}"
 export DEBIAN_FRONTEND=noninteractive
+# First boot: wait for cloud-init / unattended-upgrades to release the dpkg lock instead of failing.
+echo 'DPkg::Lock::Timeout "600";' > /etc/apt/apt.conf.d/99adjutant-lock-timeout
 
 apt-get update -y
 apt-get install -y git curl ca-certificates debian-keyring debian-archive-keyring apt-transport-https python3 python3-cryptography sqlite3 gnupg
