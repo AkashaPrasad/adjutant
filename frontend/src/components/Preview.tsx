@@ -1,142 +1,74 @@
-import type { ReactNode } from 'react'
 import type { RunItem } from '../api/types'
-import { formatDateTime, inlineValue } from '../lib/format'
+import { CalendarCard, CrmDiff, EmailCard, SlackMessage, WebPageCard, type FieldChange } from './Artifacts'
 import { JsonView } from './JsonView'
-import { KeyValue } from './ui'
+import { Badge } from './ui'
 
-const str = (v: unknown) => (typeof v === 'string' ? v : v === undefined || v === null ? '' : inlineValue(v))
+const str = (v: unknown) => (typeof v === 'string' ? v : v === undefined || v === null ? '' : String(v))
 const list = (v: unknown): string[] => (Array.isArray(v) ? v.map(String) : typeof v === 'string' && v ? [v] : [])
 
-function Diff({ rows }: { rows: { field: string; from: unknown; to: unknown }[] }) {
-  if (!rows.length) return <p className="muted">No field changes: the record already holds these values.</p>
-  return (
-    <div className="diff" role="table" aria-label="Field changes">
-      {rows.map((r) => (
-        <div key={r.field} className="diff-hunk" role="rowgroup">
-          <div className="diff-head" role="row">
-            <span role="cell">{r.field}</span>
-          </div>
-          <div className="diff-line diff-del" role="row">
-            <span className="diff-sign" aria-label="removed">
-              -
-            </span>
-            <span role="cell">{r.from === undefined || r.from === null ? '(empty)' : inlineValue(r.from)}</span>
-          </div>
-          <div className="diff-line diff-add" role="row">
-            <span className="diff-sign" aria-label="added">
-              +
-            </span>
-            <span role="cell">{inlineValue(r.to)}</span>
-          </div>
-        </div>
-      ))}
-    </div>
-  )
-}
-
-/** Human-readable rendering of the shadow-run preview for each tool. */
+/** The shadow-run preview rendered as the artifact it would create. */
 export function PreviewView({ item }: { item: RunItem }) {
   const p = (item.preview ?? {}) as Record<string, unknown>
+  const a = item.args
   if (typeof p.error === 'string') {
     return <p className="text-danger">Shadow run failed: {p.error}</p>
   }
-  let body: ReactNode
   switch (item.tool) {
     case 'email.send': {
       const external = list(p.external_recipients)
-      body = (
-        <div className="mail">
-          <KeyValue
-            rows={[
-              ['To', <span className="mono">{list(p.to ?? item.args.to).join(', ')}</span>],
-              ...(list(p.cc).length ? ([['Cc', <span className="mono">{list(p.cc).join(', ')}</span>]] as [string, ReactNode][]) : []),
-              ['Subject', str(p.subject ?? item.args.subject)],
-            ]}
-          />
-          <pre className="mail-body">{str(item.args.body ?? p.body_preview)}</pre>
-          {external.length > 0 && (
-            <p className="small text-warning">
-              External recipient{external.length > 1 ? 's' : ''}: <span className="mono">{external.join(', ')}</span>. Email cannot be recalled once sent.
-            </p>
-          )}
-        </div>
+      return (
+        <EmailCard
+          to={list(p.to ?? a.to)}
+          cc={list(p.cc ?? a.cc)}
+          subject={str(p.subject ?? a.subject)}
+          body={str(a.body ?? p.body_preview)}
+          status={external.length ? <Badge tone="warning">external</Badge> : undefined}
+          note={
+            external.length ? (
+              <span className="text-warning" title={`External: ${external.join(', ')}`}>
+                Cannot be recalled once sent.
+              </span>
+            ) : undefined
+          }
+        />
       )
-      break
     }
     case 'slack.post':
-      body = (
-        <div className="mail">
-          <KeyValue rows={[['Channel', <span className="mono">{str(p.channel ?? item.args.channel)}</span>]]} />
-          <pre className="mail-body">{str(item.args.text ?? p.text)}</pre>
-        </div>
-      )
-      break
+      return <SlackMessage channel={str(p.channel ?? a.channel)} text={str(a.text ?? p.text)} status={<Badge tone="neutral">preview</Badge>} />
     case 'crm.update': {
-      const changes = Array.isArray(p.changes) ? (p.changes as { field: string; from: unknown; to: unknown }[]) : []
-      body = (
-        <div className="stack-sm">
-          <KeyValue rows={[['Record', <span className="mono">{str(p.record_id ?? item.args.record_id)}</span>]]} />
-          <Diff rows={changes} />
-        </div>
-      )
-      break
+      const changes = Array.isArray(p.changes) ? (p.changes as FieldChange[]) : []
+      const name = /\(([^)]+)\)\s*$/.exec(str(p.summary))?.[1]
+      return <CrmDiff recordId={str(p.record_id ?? a.record_id)} name={name} changes={changes} />
     }
     case 'calendar.create_event': {
-      const conflicts = Array.isArray(p.conflicts) ? (p.conflicts as { title?: string }[]) : []
-      body = (
-        <div className="stack-sm">
-          <KeyValue
-            rows={[
-              ['Title', str(p.title)],
-              ['Start', formatDateTime(p.start)],
-              ['End', formatDateTime(p.end)],
-              ['Attendees', <span className="mono">{list(p.attendees).join(', ')}</span>],
-              ['Conflicts', conflicts.length ? <span className="text-warning">{conflicts.map((c) => c.title).join(', ')}</span> : 'None'],
-            ]}
-          />
-        </div>
+      const conflicts = Array.isArray(p.conflicts) ? (p.conflicts as { title?: string }[]).map((c) => c.title ?? '?') : []
+      return (
+        <CalendarCard
+          title={str(p.title ?? a.title)}
+          start={str(p.start ?? a.start)}
+          end={str(p.end ?? a.end)}
+          attendees={list(p.attendees ?? a.attendees)}
+          conflicts={conflicts}
+        />
       )
-      break
     }
     case 'http.get':
-      body = (
-        <div className="stack-sm">
-          <KeyValue
-            rows={[
-              ['URL', <span className="mono">{str(p.url)}</span>],
-              ['Status', str(p.status)],
-              ['Trust', <span className="text-warning">untrusted content</span>],
-            ]}
-          />
-          {str(p.content) && <blockquote className="quote">{str(p.content)}</blockquote>}
-        </div>
-      )
-      break
+      return <WebPageCard url={str(p.url ?? a.url)} status={p.status} content={str(p.content)} />
     case 'docs.search': {
       const results = Array.isArray(p.results) ? (p.results as { id: string; title: string; snippet: string }[]) : []
-      body = results.length ? (
+      return results.length ? (
         <ul className="doc-results">
           {results.map((r) => (
-            <li key={r.id}>
-              <div className="doc-title">
-                {r.title} <span className="mono muted">{r.id}</span>
-              </div>
-              <div className="muted small">{r.snippet}</div>
+            <li key={r.id} title={r.snippet}>
+              <span className="doc-title">{r.title}</span> <span className="mono muted">{r.id}</span>
             </li>
           ))}
         </ul>
       ) : (
-        <p className="muted">No documents matched.</p>
+        <p className="muted">No documents matched “{str(a.query)}”.</p>
       )
-      break
     }
     default:
-      body = <JsonView value={p} />
+      return <JsonView value={p} />
   }
-  return (
-    <div className="preview">
-      {typeof p.summary === 'string' && <p className="preview-summary">{p.summary}</p>}
-      {body}
-    </div>
-  )
 }

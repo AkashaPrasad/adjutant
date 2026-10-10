@@ -1,13 +1,14 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { api, errorMessage, isMissingEndpoint } from '../api/client'
 import type { Effect, SandboxObject } from '../api/types'
 import { JsonView } from '../components/JsonView'
+import { CalendarCard, CrmRecordCard, EmailCard, SlackMessage } from '../components/Artifacts'
 import { ConfirmDialog } from '../components/Shell'
 import { UndoCell } from '../components/EffectsTable'
 import { useToast } from '../components/Toast'
 import { Badge, EmptyState, ErrorState, Hash, PageHeader, Panel, SidePanel, Skeleton, Tabs, cx, truncateMiddle } from '../components/ui'
 import { loadScenarios } from '../lib/data'
-import { formatDateTime, inlineValue, relativeTime } from '../lib/format'
+import { formatDateTime, relativeTime } from '../lib/format'
 import { effectStatusMeta, type Tone } from '../lib/labels'
 import { useAsync, useDocumentTitle } from '../lib/hooks'
 import { linkHandler } from '../lib/router'
@@ -119,7 +120,7 @@ export function Systems() {
     <div className="page">
       <PageHeader
         title="Systems"
-        subtitle="Sandbox state the agents operate on. Read-only. Refreshes every 5 seconds, so execute and undo show up here."
+        subtitle="Sandbox systems the agents act on. Read-only, live."
         actions={
           <button type="button" className="btn btn-danger" onClick={() => setConfirm(true)}>
             Reset sandbox
@@ -224,104 +225,50 @@ function RecordsTable({
   undoByExternal: Map<string, Effect>
   onSelect: (o: SandboxObject) => void
 }) {
-  const d = (o: SandboxObject, k: string) => o.data[k]
-  const cols: { label: string; cell: (o: SandboxObject) => ReactNode; num?: boolean }[] = (() => {
-    switch (system) {
-      case 'email':
-        return [
-          { label: 'To', cell: (o) => <span className="mono">{inlineValue(d(o, 'to'))}</span> },
-          { label: 'Subject', cell: (o) => String(d(o, 'subject') ?? '') },
-        ]
-      case 'slack_message':
-        return [
-          { label: 'Channel', cell: (o) => <span className="mono">{String(d(o, 'channel') ?? '')}</span> },
-          { label: 'Text', cell: (o) => <span className={o.status === 'deleted' ? 'struck' : undefined}>{String(d(o, 'text') ?? '')}</span> },
-        ]
-      case 'crm_record':
-        return [
-          { label: 'Name', cell: (o) => String(d(o, 'name') ?? '') },
-          { label: 'Stage', cell: (o) => String(d(o, 'stage') ?? '') },
-          { label: 'Owner', cell: (o) => <span className="mono">{String(d(o, 'owner') ?? '')}</span> },
-          { label: 'ARR', cell: (o) => (typeof d(o, 'arr') === 'number' ? `$${(d(o, 'arr') as number).toLocaleString()}` : '—'), num: true },
-          {
-            label: 'Other fields',
-            cell: (o) =>
-              Object.entries(o.data)
-                .filter(([k]) => !['name', 'stage', 'owner', 'arr'].includes(k))
-                .map(([k, v]) => `${k}: ${inlineValue(v)}`)
-                .join(' · ') || '—',
-          },
-        ]
-      case 'calendar_event':
-        return [
-          { label: 'Title', cell: (o) => <span className={o.status === 'cancelled' ? 'struck' : undefined}>{String(d(o, 'title') ?? '')}</span> },
-          { label: 'Start', cell: (o) => formatDateTime(d(o, 'start')) },
-          { label: 'Attendees', cell: (o) => <span className="mono">{inlineValue(d(o, 'attendees'))}</span> },
-        ]
-      default:
-        return [
-          {
-            label: 'From',
-            cell: (o) => (
-              <span>
-                {d(o, 'from_name') ? `${String(d(o, 'from_name'))} ` : ''}
-                <span className="mono muted">{String(d(o, 'from') ?? '')}</span>
-              </span>
-            ),
-          },
-          { label: 'Subject', cell: (o) => String(d(o, 'subject') ?? '') },
-          {
-            label: 'Trust',
-            cell: (o) =>
-              d(o, 'trust') === 'untrusted' || o.id.startsWith('fixture-') ? <Badge tone="warning">untrusted</Badge> : String(d(o, 'trust') ?? '—'),
-          },
-        ]
-    }
-  })()
+  const str = (v: unknown) => (v === undefined || v === null ? '' : String(v))
+  const list = (v: unknown): string[] => (Array.isArray(v) ? v.map(String) : typeof v === 'string' && v ? [v] : [])
   return (
-    <div className="table-wrap table-scroll">
-      <table className="table table-click">
-        <thead>
-          <tr>
-            <th scope="col">Id</th>
-            {cols.map((c) => (
-              <th key={c.label} scope="col" className={c.num ? 'num' : undefined}>
-                {c.label}
-              </th>
-            ))}
-            <th scope="col">Status</th>
-            <th scope="col">Updated</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((o) => {
-            const st = objectStatus(system, o, undoByExternal)
-            return (
-              <tr key={o.id} onClick={() => onSelect(o)}>
-                <td className="mono nowrap">
-                  <button type="button" className="link-btn mono" onClick={() => onSelect(o)}>
-                    {truncateMiddle(o.id, 14, 4)}
-                  </button>
-                </td>
-                {cols.map((c) => (
-                  <td key={c.label} className={c.num ? 'num' : 'cell-clip'}>
-                    {c.cell(o)}
-                  </td>
-                ))}
-                <td className="nowrap">
-                  <Badge tone={st.tone} dot>
-                    {st.label}
-                  </Badge>
-                  {st.note && <div className="small text-warning">{st.note}</div>}
-                </td>
-                <td className="muted nowrap" title={formatDateTime(o.updated_at)}>
-                  {relativeTime(o.updated_at)}
-                </td>
-              </tr>
+    <div className={cx('art-grid', system === 'slack_message' && 'art-grid-1')}>
+      {rows.map((o) => {
+        const st = objectStatus(system, o, undoByExternal)
+        const chip = (
+          <Badge tone={st.note ? 'warning' : st.tone} dot title={st.note}>
+            {st.note ? 'Cannot be recalled' : st.label}
+          </Badge>
+        )
+        const d = o.data
+        let card
+        switch (system) {
+          case 'email':
+            card = <EmailCard compact from={str(d.from) || undefined} to={list(d.to)} cc={list(d.cc)} subject={str(d.subject)} body={str(d.body)} status={chip} />
+            break
+          case 'slack_message':
+            card = <SlackMessage channel={str(d.channel)} text={str(d.text)} author={str(d.author) || undefined} at={str(d.posted_at) || o.created_at} deleted={o.status === 'deleted'} status={chip} />
+            break
+          case 'crm_record':
+            card = <CrmRecordCard id={o.id} data={d} status={chip} />
+            break
+          case 'calendar_event':
+            card = <CalendarCard title={str(d.title)} start={str(d.start)} end={str(d.end)} attendees={list(d.attendees)} cancelled={o.status === 'cancelled'} status={chip} />
+            break
+          default:
+            card = (
+              <EmailCard
+                compact
+                from={`${d.from_name ? `${str(d.from_name)} ` : ''}<${str(d.from)}>`}
+                to={list(d.to)}
+                subject={str(d.subject)}
+                body={str(d.body)}
+                status={d.trust === 'untrusted' || o.id.startsWith('fixture-') ? <Badge tone="warning">untrusted</Badge> : chip}
+              />
             )
-          })}
-        </tbody>
-      </table>
+        }
+        return (
+          <button key={o.id} type="button" className="art-btn" onClick={() => onSelect(o)} aria-label={`Open ${o.id}`} title={`${o.id} · updated ${formatDateTime(o.updated_at)}`}>
+            {card}
+          </button>
+        )
+      })}
     </div>
   )
 }

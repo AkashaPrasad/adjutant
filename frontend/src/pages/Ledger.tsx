@@ -56,7 +56,7 @@ export function Ledger() {
     <div className="page">
       <PageHeader
         title="Effects"
-        subtitle="The effect ledger: every side effect, keyed on (run, node, args hash). A retried execute hits this key and returns the stored result instead of acting twice."
+        subtitle="Every side effect, written exactly once per (run, node, args hash)."
       />
       <ListTabs active="effects" />
       <div className="toolbar">

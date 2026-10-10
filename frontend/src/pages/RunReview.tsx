@@ -5,6 +5,7 @@ import { Timeline } from '../components/Activity'
 import { DecisionBadge, ItemStatusChip, RiskText, SourceBadge, StatusChip } from '../components/Badge'
 import { EffectsTable, UndoCell } from '../components/EffectsTable'
 import { JsonView } from '../components/JsonView'
+import { CheckGlyph, CrossGlyph, Disclosure, ReversibilityGlyph, RiskMeter } from '../components/Glyphs'
 import { PreviewView } from '../components/Preview'
 import { ConfirmDialog } from '../components/Shell'
 import { useToast } from '../components/Toast'
@@ -28,7 +29,7 @@ import {
 import { MODEL_NAME } from '../config'
 import { downloadJson, formatDateTime, inlineValue, plural, relativeTime } from '../lib/format'
 import { useAsync, useDocumentTitle, useElapsed, useLocalStorage } from '../lib/hooks'
-import { decisionReason, flagMeta, gateDecision, judgeLabel, runStatusMeta } from '../lib/labels'
+import { decisionReason, flagMeta, gateDecision, judgeLabel, runStatusMeta, shortReason } from '../lib/labels'
 import { linkHandler } from '../lib/router'
 import { runCache } from '../lib/runCache'
 import { useScenarios } from '../lib/data'
@@ -75,22 +76,32 @@ function steps(run: Run, auditValid: boolean | null): { label: string; state: St
   ]
 }
 
+const STATE_WORD: Record<StepState, string> = { done: 'Done', current: 'Now', failed: 'Failed', todo: 'Next' }
+
 function Stepper({ run, auditValid }: { run: Run; auditValid: boolean | null }) {
+  const list = steps(run, auditValid)
+  let reached = 0
+  list.forEach((st, i) => {
+    if (st.state !== 'todo') reached = i
+  })
+  const pct = (reached / (list.length - 1)) * 100
   return (
-    <ol className="stepper" aria-label="Run progress">
-      {steps(run, auditValid).map((st, i) => (
-        <li key={st.label} className={cx('step', `is-${st.state}`)} aria-current={st.state === 'current' ? 'step' : undefined}>
-          <span className="step-num" aria-hidden="true">
-            {st.state === 'done' ? '✓' : st.state === 'failed' ? '✕' : i + 1}
-          </span>
-          <span className="step-text">
+    <div className="stepper" aria-label="Run progress">
+      <div className="stepper-track" aria-hidden="true">
+        <span className="stepper-fill" style={{ width: `${pct}%` }} />
+      </div>
+      <ol className="stepper-steps">
+        {list.map((st, i) => (
+          <li key={st.label} className={cx('step', `is-${st.state}`)} aria-current={st.state === 'current' ? 'step' : undefined} title={st.hint}>
+            <span className="step-num" aria-hidden="true">
+              {st.state === 'done' ? <CheckGlyph size={12} /> : st.state === 'failed' ? <CrossGlyph size={12} /> : i + 1}
+            </span>
             <span className="step-label">{st.label}</span>
-            <span className="step-hint">{st.hint}</span>
-          </span>
-          <span className="sr-only">{st.state}</span>
-        </li>
-      ))}
-    </ol>
+            <span className="step-state">{st.state === 'current' || st.state === 'failed' ? st.hint : STATE_WORD[st.state]}</span>
+          </li>
+        ))}
+      </ol>
+    </div>
   )
 }
 
@@ -386,8 +397,9 @@ export function RunReview({ id }: { id: string }) {
 
       {replay && (
         <Callout tone="info" title="Replayed from effect ledger: no duplicate side effects">
-          The second execute call hit the ledger key (run, node, args hash) and returned the stored result. Effects in the ledger:{' '}
-          <strong>{replay.before}</strong> before, <strong>{replay.after}</strong> after. Check Systems: the outbox still holds one copy.
+          <span title="The second execute call hit the ledger key (run, node, args hash) and returned the stored result. The outbox still holds one copy.">
+            Effects in the ledger: <strong>{replay.before}</strong> before, <strong>{replay.after}</strong> after.
+          </span>
         </Callout>
       )}
       {actionError != null && <ErrorState error={actionError} title="The last action failed" />}
@@ -408,18 +420,17 @@ export function RunReview({ id }: { id: string }) {
               const summary = typeof it.preview?.summary === 'string' ? it.preview.summary : inlineValue(it.args)
               return (
                 <li key={it.node_id} role="option" aria-selected={sel}>
-                  <button type="button" className={cx('alist-row', sel && 'is-selected')} onClick={() => setSelectedId(it.node_id)}>
-                    <span className="alist-line1">
-                      <span className="mono alist-tool">
-                        <span className="alist-seq">{(it.seq ?? 0) + 1}</span>
-                        {it.tool}
-                      </span>
-                      <DecisionBadge item={it} staged={staged[stageKey(it)]} />
-                    </span>
-                    <span className="alist-line2">
-                      <span className="alist-summary">{summary}</span>
-                      <RiskText risk={it.risk} />
-                    </span>
+                  <button
+                    type="button"
+                    className={cx('alist-row', sel && 'is-selected', `is-${gateDecision(it)}`)}
+                    onClick={() => setSelectedId(it.node_id)}
+                    title={summary}
+                  >
+                    <span className="alist-seq">{(it.seq ?? 0) + 1}</span>
+                    <span className="mono alist-tool">{it.tool}</span>
+                    <ReversibilityGlyph kind={it.kind} reversible={it.reversible} />
+                    <RiskMeter risk={it.risk} />
+                    <DecisionBadge item={it} staged={staged[stageKey(it)]} />
                   </button>
                 </li>
               )
@@ -472,7 +483,7 @@ export function RunReview({ id }: { id: string }) {
       {run.effects.length > 0 && (
         <Panel
           title="Effects"
-          subtitle="Written to the effect ledger exactly once, keyed on (run, node, args hash). Undo compensates newest first."
+          subtitle="Exactly once, keyed on (run, node, args hash)"
           flush
           actions={
             run.undo ? (
@@ -488,7 +499,7 @@ export function RunReview({ id }: { id: string }) {
       )}
 
       {run.undo && (
-        <Panel title="Undo results" subtitle="Compensations ran newest first.">
+        <Panel title="Undo results" subtitle="Newest first">
           <ul className="undo-results">
             {[...run.effects]
               .reverse()
@@ -499,7 +510,9 @@ export function RunReview({ id }: { id: string }) {
                   <li key={e.id}>
                     <span className="mono">{e.node_id}</span>
                     <UndoCell e={e} />
-                    <span className="text-2">{typeof msg === 'string' ? msg : (e.undo_status ?? '').replace('_', ' ')}</span>
+                    <span className="text-2 one-line" title={typeof msg === 'string' ? msg : undefined}>
+                      {typeof msg === 'string' ? msg : (e.undo_status ?? '').replace('_', ' ')}
+                    </span>
                   </li>
                 )
               })}
@@ -656,20 +669,20 @@ function nextStep(run: Run, pending: number, blocked: number): { title: string; 
       return {
         tone: 'warning',
         title: `${plural(pending, 'action')} need${pending === 1 ? 's' : ''} your approval.`,
-        body: `Approve or reject each one, then submit a single review. ${run.summary?.auto_approved ?? 0} were auto-approved by policy${blocked ? `; ${blocked} blocked` : ''}.`,
+        body: `${run.summary?.auto_approved ?? 0} auto-approved${blocked ? `, ${blocked} blocked` : ''}. One review for the batch.`,
       }
     case 'blocked':
       return {
         tone: 'danger',
         title: `${plural(blocked, 'action')} blocked by policy.`,
-        body: 'Edit the blocked value to a trusted one (the action re-gates with a new hash), proceed without it, or reject the run.',
+        body: 'Edit to fix, proceed without it, or reject.',
       }
     case 'approved':
-      return { tone: 'info', title: 'Approved and ready.', body: 'Execute runs every approved action exactly once through the effect ledger, then verifies the done-criteria.' }
+      return { tone: 'info', title: 'Approved and ready.', body: 'Execute runs each action once, then verifies.' }
     case 'executing':
-      return { tone: 'info', title: 'Executing.', body: 'Effects are written through the ledger; verification follows.' }
+      return { tone: 'info', title: 'Executing.', body: 'Writing through the ledger, then verifying.' }
     case 'completed':
-      return { tone: 'success', title: 'Executed and verified.', body: 'Every done-criterion was met by real outputs. Try Execute again to see exactly-once, or Undo.' }
+      return { tone: 'success', title: 'Executed and verified.', body: 'All done-criteria met by real outputs.' }
     case 'partially_completed': {
       const v = run.verification
       const held = run.items.filter((i) => ['blocked', 'declined', 'rejected', 'skipped'].includes(i.status)).length
@@ -677,21 +690,21 @@ function nextStep(run: Run, pending: number, blocked: number): { title: string; 
         return {
           tone: 'warning',
           title: 'Done claim not verified.',
-          body: `Only ${v.criteria_met ?? 0} of ${v.criteria_total ?? v.criteria?.length ?? 0} done-criteria were met by real outputs, so the gate does not report this run as done. See Verification.`,
+          body: `${v.criteria_met ?? 0} of ${v.criteria_total ?? v.criteria?.length ?? 0} done-criteria met by real outputs.`,
         }
       }
       return {
         tone: 'warning',
         title: 'Completed with held-back items.',
-        body: `${plural(held, 'action')} did not run because the gate held ${held === 1 ? 'it' : 'them'} back. Everything that ran was verified.`,
+        body: `${plural(held, 'action')} held back by the gate; everything that ran was verified.`,
       }
     }
     case 'failed':
-      return { tone: 'danger', title: 'Execution failed.', body: 'No effect completed. See the effects and timeline for the error.' }
+      return { tone: 'danger', title: 'Execution failed.', body: 'No effect completed.' }
     case 'compensated':
-      return { tone: 'neutral', title: 'Undone.', body: 'Reversible effects were compensated newest first. Irreversible ones (sent email) are recorded as not reversible.' }
+      return { tone: 'neutral', title: 'Undone.', body: 'Reversible effects compensated, newest first.' }
     case 'rejected':
-      return { tone: 'neutral', title: 'Rejected.', body: 'A reviewer rejected the plan. Nothing was executed.' }
+      return { tone: 'neutral', title: 'Rejected.', body: 'Nothing was executed.' }
     default:
       return { tone: 'neutral', title: runStatusMeta(run.status).label, body: '' }
   }
@@ -751,9 +764,17 @@ function ActionDetail({
       <div className={cx('decision-reason', `is-${decision}`)}>
         <div className="decision-reason-head">
           <DecisionBadge item={item} staged={staged} />
-          <RiskText risk={item.risk} />
+          <span className="row gap-sm">
+            <ReversibilityGlyph kind={item.kind} reversible={item.reversible} />
+            <RiskMeter risk={item.risk} />
+            <RiskText risk={item.risk} />
+          </span>
         </div>
-        {reason && <p>{renderTicks(reason)}</p>}
+        {reason && (
+          <p className="decision-hint" title={reason.replace(/`/g, '')}>
+            {renderTicks(shortReason(item))}
+          </p>
+        )}
         {flags.length > 0 && (
           <div className="flag-row">
             {flags.map((f) => {
@@ -784,7 +805,7 @@ function ActionDetail({
             </>
           ) : item.status === 'blocked' ? (
             <>
-              <span className="decision-bar-label text-danger">Cannot be approved while blocked. Fix the value to re-gate it.</span>
+              <span className="decision-bar-label text-danger">Cannot be approved while blocked.</span>
               {editable && (
                 <button type="button" className="btn" onClick={onEdit}>
                   Edit to fix
@@ -948,7 +969,7 @@ function VerificationPanel({ run, agentClaim }: { run: Run; agentClaim?: string 
   if (!v) {
     return (
       <Panel title="Verification">
-        <p className="muted">Not verified. Verification runs after execution.</p>
+        <p className="muted">Runs after execution.</p>
       </Panel>
     )
   }
@@ -959,73 +980,59 @@ function VerificationPanel({ run, agentClaim }: { run: Run; agentClaim?: string 
   return (
     <Panel
       title="Verification"
-      subtitle="Done-criteria judged against the real outputs of executed effects, not against the plan."
+      subtitle="Judged on real outputs, not the plan"
       actions={
         <Badge tone={v.passed ? 'success' : 'danger'} dot>
           {v.passed ? 'Verified' : 'Not verified'} · {met}/{total} criteria met
         </Badge>
       }
-      flush
     >
-      <div className="panel-body stack-sm">
-        {agentClaim && (
-          <div className="claim-vs">
-            <div className="claim">
-              <div className="claim-label">Agent claimed</div>
-              <blockquote className="quote">{agentClaim}</blockquote>
-            </div>
-            <div className={cx('claim', v.passed ? 'is-ok' : 'is-bad')}>
-              <div className="claim-label">Gate verdict</div>
-              <p>
-                <strong className={v.passed ? 'text-success' : 'text-danger'}>{v.passed ? 'Verified done' : 'Not done'}</strong>:{' '}
-                {met} of {total} done-criteria met by real outputs.
-              </p>
-            </div>
+      {agentClaim && (
+        <div className="claim-vs">
+          <div className="claim">
+            <div className="claim-label">Agent claimed</div>
+            <p className="claim-text" title={agentClaim}>
+              {agentClaim}
+            </p>
           </div>
-        )}
-        <KeyValue
-          rows={[
-            [
-              'Judge',
-              <span>
-                {judge}
-                {judgeId === 'muse' && v.model ? <span className="mono muted"> ({v.model})</span> : null}
-                {judgeId !== 'muse' && <span className="muted"> (effect-ledger state checks)</span>}
-              </span>,
-            ],
-            ['Judge latency', v.judge_latency_ms !== undefined ? `${(v.judge_latency_ms / 1000).toFixed(1)}s` : '—'],
-            ['Effects checked against system state', v.effects_verified ? <span className="text-success">all verified</span> : <span className="text-danger">not all verified</span>],
-            ['Verified at', formatDateTime(v.verified_at)],
-          ]}
-        />
-        {v.note && <Callout tone="warning">{v.note}</Callout>}
+          <div className={cx('claim', v.passed ? 'is-ok' : 'is-bad')}>
+            <div className="claim-label">Gate verdict</div>
+            <p className="claim-text">
+              <strong className={v.passed ? 'text-success' : 'text-danger'}>{v.passed ? 'Verified done' : 'Not done'}</strong>: {met} of {total}
+            </p>
+          </div>
+        </div>
+      )}
+      <ul className="checklist">
+        {(v.criteria ?? []).map((c, i) => (
+          <li key={i} className={cx('check-item', c.met ? 'is-met' : 'is-unmet')}>
+            <Disclosure
+              summary={
+                <>
+                  <span className="check-mark" aria-label={c.met ? 'Met' : 'Not met'}>
+                    {c.met ? <CheckGlyph size={13} /> : <CrossGlyph size={13} />}
+                  </span>
+                  <span className="check-text">{c.criterion}</span>
+                </>
+              }
+            >
+              <p className="text-2">{c.evidence ?? 'No evidence recorded.'}</p>
+              <p className="muted small">Judge: {judgeLabel(c.judge ?? judgeId, v.model)}</p>
+            </Disclosure>
+          </li>
+        ))}
+      </ul>
+      <div className="verify-foot">
+        <span className="muted small" title={judgeId === 'muse' && v.model ? v.model : 'effect-ledger state checks'}>
+          Judge: <span className="text-2">{judge}</span>
+          {v.judge_latency_ms !== undefined ? ` · ${(v.judge_latency_ms / 1000).toFixed(1)}s` : ''}
+        </span>
+        <span className={cx('small', v.effects_verified ? 'text-success' : 'text-danger')}>
+          {v.effects_verified ? 'Effects match system state' : 'Some effects do not match system state'}
+        </span>
+        <span className="muted small">{formatDateTime(v.verified_at)}</span>
       </div>
-      <div className="table-wrap">
-        <table className="table">
-          <thead>
-            <tr>
-              <th scope="col">Criterion</th>
-              <th scope="col">Result</th>
-              <th scope="col">Evidence</th>
-              <th scope="col">Judge</th>
-            </tr>
-          </thead>
-          <tbody>
-            {(v.criteria ?? []).map((c, i) => (
-              <tr key={i}>
-                <td className="cell-wrap">{c.criterion}</td>
-                <td className="nowrap">
-                  <Badge tone={c.met ? 'success' : 'danger'} dot>
-                    {c.met ? 'Met' : 'Not met'}
-                  </Badge>
-                </td>
-                <td className="cell-wrap text-2">{c.evidence ?? '—'}</td>
-                <td className="nowrap muted">{judgeLabel(c.judge ?? judgeId, v.model)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {v.note && <Callout tone="warning" title="Deterministic fallback">{v.note}</Callout>}
     </Panel>
   )
 }
@@ -1055,12 +1062,14 @@ function AuditPanel({
 }) {
   if (!audit) {
     return (
-      <Panel title="Audit packet" subtitle="Plan, diff, decisions, reviewer, effects, verification and every event, signed with HMAC-SHA256.">
+      <Panel title="Audit packet" subtitle="Signed HMAC-SHA256 evidence for auditors">
         <div className="row gap-sm wrap">
           <button type="button" className="btn" onClick={onLoad} disabled={busy === 'audit'}>
             {busy === 'audit' ? 'Generating…' : 'Generate audit packet'}
           </button>
-          <span className="muted small">Evidence for auditors (EU AI Act record keeping, AIUC-1).</span>
+          <span className="muted small" title="Plan, diff, decisions, reviewer, effects, verification and every event. Evidence for EU AI Act record keeping and AIUC-1.">
+            Plan, decisions, effects, events
+          </span>
         </div>
       </Panel>
     )
@@ -1076,7 +1085,7 @@ function AuditPanel({
   return (
     <Panel
       title="Audit packet"
-      subtitle="Signed evidence for auditors. Verify recomputes the HMAC on the server; any changed byte fails."
+      subtitle="Server recomputes the HMAC; any changed byte fails"
       actions={
         <div className="row gap-sm wrap">
           <button type="button" className="btn btn-sm" onClick={() => navigator.clipboard?.writeText(JSON.stringify({ ...audit, packet: shown }, null, 2))}>

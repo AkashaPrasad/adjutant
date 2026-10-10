@@ -1,5 +1,6 @@
 import { api } from '../api/client'
 import { Badge, PageHeader, Panel, Skeleton } from '../components/ui'
+import { CollapsiblePanel } from '../components/Glyphs'
 import { MODEL_FULL_NAME, MODEL_ID, MODEL_NAME } from '../config'
 import { useAsync, useDocumentTitle } from '../lib/hooks'
 import { linkHandler } from '../lib/router'
@@ -97,13 +98,13 @@ function DataPlane() {
   )
 }
 
-const PAINS = [
-  ['Actions cannot be taken back', 'Effect ledger keyed on (run, node, args hash); compensation runs newest first', 'No double sends on retry; undo where the system allows it'],
-  ['Human review stops working at volume (93-97% of prompts rubber-stamped)', 'Shadow run first, then one batched plan diff; policy auto-approves low-risk reversible writes', 'One review per task, and only for actions that need it'],
-  ['Approved one thing, ran another', 'Approval is bound to the args hash; any edit goes back through the gate', 'What the reviewer saw is exactly what runs'],
-  ['Injected content choosing a recipient', 'Per-argument taint: untrusted data may fill a body, never `to`, `channel` or a record id', 'Inbound mail and web pages cannot redirect an action'],
-  ['Agents report work they did not do (false done)', 'Checkable done-criteria judged against the real outputs of executed effects', 'Done means verified, not claimed'],
-  ['No evidence for auditors', 'Signed audit packet per run (HMAC-SHA256 over canonical JSON): plan, diff, decision, reviewer, effects, events', 'Evidence for EU AI Act record keeping and AIUC-1'],
+const PAINS: [string, string, string, string][] = [
+  ['Actions cannot be taken back', 'Effect ledger, newest-first undo', 'No double sends', 'Effect ledger keyed on (run, node, args hash); compensation runs newest first. No double sends on retry; undo where the system allows it.'],
+  ['Review fails at volume (93-97% rubber-stamped)', 'Shadow run, one batched plan diff', 'One review per task', 'Shadow run first, then one batched plan diff; policy auto-approves low-risk reversible writes. One review per task, only for actions that need it.'],
+  ['Approved one thing, ran another', 'Approval bound to args hash', 'What you saw runs', 'Approval is bound to the args hash; any edit goes back through the gate.'],
+  ['Injected content choosing a recipient', 'Per-argument taint', 'Inbound text cannot redirect', 'Untrusted data may fill a body, never `to`, `channel` or a record id. Inbound mail and web pages cannot redirect an action.'],
+  ['Agents report work they did not do', 'Criteria judged on real outputs', 'Done means verified', 'Checkable done-criteria judged against the real outputs of executed effects.'],
+  ['No evidence for auditors', 'Signed audit packet (HMAC)', 'Audit-ready evidence', 'HMAC-SHA256 over canonical JSON: plan, diff, decision, reviewer, effects, events. Evidence for EU AI Act record keeping and AIUC-1.'],
 ]
 
 const RULES = [
@@ -115,9 +116,6 @@ const RULES = [
   ['6', 'Reversible write with trusted arguments', 'Auto (if enabled)', 'Low'],
 ]
 
-function ticks(text: string) {
-  return text.split('`').map((p, i) => (i % 2 ? <code key={i}>{p}</code> : <span key={i}>{p}</span>))
-}
 
 export function HowItWorks() {
   useDocumentTitle('How it works')
@@ -126,7 +124,7 @@ export function HowItWorks() {
     <div className="page page-narrow">
       <PageHeader
         title="How it works"
-        subtitle="Adjutant Gate is the action layer between an AI agent and the systems it touches. Every side effect is previewed, approved only when it needs to be, executed once, undone where possible, and verified."
+        subtitle="The action layer between an AI agent and real systems."
         actions={
           <a href="/new?scenario=vendor-followup" className="btn btn-primary" onClick={linkHandler('/new?scenario=vendor-followup')}>
             Try a scenario
@@ -144,18 +142,16 @@ export function HowItWorks() {
             <thead>
               <tr>
                 <th scope="col">Problem</th>
-                <th scope="col">What the gate does</th>
+                <th scope="col">Gate mechanism</th>
                 <th scope="col">Result</th>
               </tr>
             </thead>
             <tbody>
-              {PAINS.map(([p, d, r]) => (
-                <tr key={p}>
-                  <td className="cell-wrap">
-                    <strong className="w-500">{p}</strong>
-                  </td>
-                  <td className="cell-wrap text-2">{ticks(d)}</td>
-                  <td className="cell-wrap">{r}</td>
+              {PAINS.map(([p, d, r, full]) => (
+                <tr key={p} title={full.replace(/`/g, '')}>
+                  <td className="nowrap w-500">{p}</td>
+                  <td className="nowrap text-2">{d}</td>
+                  <td className="nowrap">{r}</td>
                 </tr>
               ))}
             </tbody>
@@ -164,7 +160,7 @@ export function HowItWorks() {
       </Panel>
 
       <div className="grid-1-1">
-        <Panel title="Policy rules" subtitle="Evaluated in order. Deterministic code: no model decides what needs a human." flush>
+        <CollapsiblePanel title="Policy rules" subtitle="Deterministic, evaluated in order">
           <div className="table-wrap">
             <table className="table">
               <thead>
@@ -193,8 +189,8 @@ export function HowItWorks() {
               </tbody>
             </table>
           </div>
-        </Panel>
-        <Panel title="Why Muse" subtitle={`${MODEL_FULL_NAME} · ${MODEL_ID}`}>
+        </CollapsiblePanel>
+        <CollapsiblePanel title="Why Muse" subtitle={`${MODEL_FULL_NAME} · ${MODEL_ID}`}>
           <div className="prose">
             <p>
               The model is used for the two jobs that need language understanding, and nothing else:
@@ -215,10 +211,10 @@ export function HowItWorks() {
               model says.
             </p>
           </div>
-        </Panel>
+        </CollapsiblePanel>
       </div>
 
-      <Panel title="Registered tools" subtitle="GET /v1/tools. Sensitive arguments are the ones taint protects." flush>
+      <CollapsiblePanel title="Registered tools" subtitle="GET /v1/tools">
         {tools.initialLoading ? (
           <div className="panel-body">
             <Skeleton rows={6} />
@@ -249,7 +245,7 @@ export function HowItWorks() {
             </table>
           </div>
         )}
-      </Panel>
+      </CollapsiblePanel>
     </div>
   )
 }

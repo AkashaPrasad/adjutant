@@ -11,15 +11,15 @@ interface Meta {
 }
 
 const RUN_STATUS: Record<string, Meta> = {
-  awaiting_approval: { label: 'Needs review', tone: 'warning', hint: 'Some actions need a human decision' },
-  blocked: { label: 'Blocked', tone: 'danger', hint: 'Policy blocked at least one action' },
+  awaiting_approval: { label: 'Needs review', tone: 'warning', hint: 'Waiting for a decision' },
+  blocked: { label: 'Blocked', tone: 'danger', hint: 'Policy blocked an action' },
   approved: { label: 'Approved', tone: 'info', hint: 'Ready to execute' },
-  executing: { label: 'Executing', tone: 'info', hint: 'Running through the effect ledger' },
-  completed: { label: 'Verified', tone: 'success', hint: 'Executed and done-criteria verified' },
-  partially_completed: { label: 'Completed, items held back', tone: 'warning', hint: 'Executed; some actions were held back by the gate or a done-criterion was not met' },
+  executing: { label: 'Executing', tone: 'info', hint: 'Writing through the ledger' },
+  completed: { label: 'Verified', tone: 'success', hint: 'Done-criteria verified' },
+  partially_completed: { label: 'Completed, items held back', tone: 'warning', hint: 'Some actions held back or criteria unmet' },
   failed: { label: 'Failed', tone: 'danger', hint: 'No effect executed successfully' },
-  compensated: { label: 'Undone', tone: 'neutral', hint: 'Reversible effects were compensated' },
-  rejected: { label: 'Rejected', tone: 'danger', hint: 'A reviewer rejected the plan; nothing ran' },
+  compensated: { label: 'Undone', tone: 'neutral', hint: 'Reversible effects compensated' },
+  rejected: { label: 'Rejected', tone: 'danger', hint: 'Nothing ran' },
 }
 
 export function runStatusMeta(status?: string | null): Meta {
@@ -215,4 +215,24 @@ export function judgeLabel(judge?: string | null, model?: string | null): string
   if (j === 'deterministic') return 'Deterministic checks'
   if (model && /muse/i.test(model)) return MODEL_NAME
   return 'Deterministic checks'
+}
+
+/** The policy reason in a few words, for the hint under the decision pill. Full text goes in the tooltip. */
+export function shortReason(item: RunItem): string {
+  const flags = item.flags ?? []
+  const taint = flags.filter((f) => f.startsWith('taint:')).map((f) => f.split(':')[1])
+  if (taint.length) return `Taint: ${taint.map((a) => `\`${a}\``).join(', ')} came from untrusted content`
+  if (flags.includes('invalid_args')) {
+    const err = item.preview && typeof item.preview.error === 'string' ? item.preview.error : 'invalid arguments'
+    return `Shadow run failed: ${err}`
+  }
+  const untrusted = flags.filter((f) => f.startsWith('untrusted_content:')).map((f) => f.split(':')[1])
+  if (item.status === 'pending_approval') {
+    if (flags.includes('irreversible')) return 'Irreversible: approve this exact version'
+    if (untrusted.length) return `Untrusted ${untrusted.join(', ')}: review before it runs`
+    return 'Policy requires a human decision'
+  }
+  if (item.approval_mode === 'policy') return flags.includes('read_only') ? 'Read only: ran for real in the shadow run' : 'Low risk and reversible: no prompt'
+  if (item.approval_mode === 'human' && item.approved_by) return `Approved by ${item.approved_by}, bound to this hash`
+  return ''
 }

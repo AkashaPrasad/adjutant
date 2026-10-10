@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { api, errorMessage, isMissingEndpoint } from '../api/client'
 import { ActivityFeed } from '../components/Activity'
 import { BarList, MixBar, StackedColumns, StatStrip, StatTile } from '../components/Charts'
@@ -25,6 +25,8 @@ export function Overview({ env }: { env?: string }) {
   const scenarios = useScenarios()
   const runsKey = (dash.data?.runs ?? []).map((r) => `${r.id}:${r.status}`).join('|')
   const blocked = useAsync(() => loadBlocked(dash.data?.runs ?? []), [runsKey])
+  const sandbox = useAsync(() => api.sandbox(), [], 30_000)
+  const crmIds = useMemo(() => new Set((sandbox.data?.crm_record ?? []).map((r) => r.id)), [sandbox.data])
   const d = dash.data
   const s = d?.stats
 
@@ -43,7 +45,7 @@ export function Overview({ env }: { env?: string }) {
     <div className="page">
       <PageHeader
         title="Overview"
-        subtitle="Agent actions through the gate: previewed in a shadow run, approved only when policy requires it, executed once, undoable, verified."
+        subtitle="Live state of every agent action passing the gate."
         meta={
           <>
             {env && <Badge tone="neutral">{env}</Badge>}
@@ -90,7 +92,7 @@ export function Overview({ env }: { env?: string }) {
             ) : (
               <>
                 <span className="status-dot tone-success" aria-hidden="true" />
-                <span>No runs waiting for review. Start a demo scenario to send a plan through the gate.</span>
+                <span>Nothing waiting for review.</span>
               </>
             )}
           </div>
@@ -107,7 +109,7 @@ export function Overview({ env }: { env?: string }) {
               label="Actions evaluated"
               value={actions.toLocaleString()}
               loading={loading}
-              delta={`across ${plural(s?.runs_total ?? 0, 'run')}`}
+              delta={plural(s?.runs_total ?? 0, 'run')}
             />
             <StatTile
               label="Auto-approval rate"
@@ -120,39 +122,43 @@ export function Overview({ env }: { env?: string }) {
               label="Blocked by taint"
               value={s?.taint_blocks ?? 0}
               loading={loading}
-              delta="untrusted value in a recipient, channel or id"
+              delta="from untrusted input"
             />
             <StatTile
               label="Verified runs"
               value={d?.verified ?? 0}
               loading={loading}
-              delta={(d?.verificationFailed ?? 0) > 0 ? `${d?.verificationFailed} failed verification` : 'no failed verification'}
+              delta={(d?.verificationFailed ?? 0) > 0 ? `${d?.verificationFailed} failed` : 'none failed'}
               deltaTone={(d?.verificationFailed ?? 0) > 0 ? 'danger' : undefined}
             />
             <StatTile
               label="Effects undone"
               value={d?.undone ?? 0}
               loading={loading}
-              delta={`${d?.notReversible ?? 0} could not be undone`}
+              delta={`${d?.notReversible ?? 0} not reversible`}
             />
           </StatStrip>
 
           <div className="grid-2-1">
             <Panel
               title="Demo scenarios"
-              subtitle="Five scripted tasks, one per failure mode. Each opens a prefilled run."
+              subtitle={
+                <span className="strip-legend">
+                  <span className="strip-dot is-auto" /> auto <span className="strip-dot is-ask" /> needs approval <span className="strip-dot is-block" /> blocked
+                </span>
+              }
               actions={scenarios.data?.source === 'local' ? <Badge tone="neutral">bundled</Badge> : undefined}
             >
-              {scenarios.initialLoading ? <Skeleton rows={5} height={40} /> : <ScenarioList scenarios={scenarios.data?.list ?? []} />}
+              {scenarios.initialLoading ? <Skeleton rows={5} height={40} /> : <ScenarioList scenarios={scenarios.data?.list ?? []} crmIds={crmIds} />}
             </Panel>
             <Panel
               title="Live activity"
               subtitle={
                 <span className="live">
-                  <span className="status-dot tone-success" aria-hidden="true" /> polling every 5s
+                  <span className="status-dot tone-success" aria-hidden="true" /> live
                 </span>
               }
-              bodyClassName="panel-scroll"
+              bodyClassName="panel-scroll panel-scroll-sm"
             >
               {activity.initialLoading ? (
                 <Skeleton rows={6} />
@@ -161,13 +167,13 @@ export function Overview({ env }: { env?: string }) {
               ) : activity.data && activity.data.events.length > 0 ? (
                 <ActivityFeed events={activity.data.events} />
               ) : (
-                <EmptyState title="No activity yet">Shadow runs, reviews, effects and undo appear here as they happen.</EmptyState>
+                <EmptyState title="No activity yet" />
               )}
             </Panel>
           </div>
 
           <div className="grid-2-1">
-            <Panel title="Actions over time" subtitle="Actions per day by gate decision, last 7 days.">
+            <Panel title="Actions over time" subtitle="Per day, by gate decision">
               {loading ? (
                 <Skeleton rows={5} height={24} />
               ) : (
@@ -180,7 +186,7 @@ export function Overview({ env }: { env?: string }) {
               )}
             </Panel>
             <div className="stack">
-              <Panel title="Decision mix" subtitle="All actions evaluated.">
+              <Panel title="Decision mix">
                 {loading ? (
                   <Skeleton rows={3} />
                 ) : (
@@ -193,7 +199,7 @@ export function Overview({ env }: { env?: string }) {
                   />
                 )}
               </Panel>
-              <Panel title="Effects by tool" subtitle="Side effects in the ledger.">
+              <Panel title="Effects by tool">
                 {loading ? (
                   <Skeleton rows={3} />
                 ) : d && d.byTool.length > 0 ? (
@@ -210,7 +216,7 @@ export function Overview({ env }: { env?: string }) {
                     }))}
                   />
                 ) : (
-                  <EmptyState title="No effects yet">Execute an approved run to record effects.</EmptyState>
+                  <EmptyState title="No effects yet" />
                 )}
               </Panel>
             </div>
@@ -264,7 +270,7 @@ export function Overview({ env }: { env?: string }) {
                   </table>
                 </div>
               ) : (
-                <EmptyState title="No pending approvals">Runs that need a human decision are listed here.</EmptyState>
+                <EmptyState title="No pending approvals" />
               )}
             </Panel>
             <Panel title="Recent blocked actions" flush>
@@ -293,7 +299,7 @@ export function Overview({ env }: { env?: string }) {
                               {b.tool}
                             </a>
                           </td>
-                          <td className="text-danger cell-truncate" title={b.rule}>
+                          <td className="text-danger cell-truncate" title={b.reason}>
                             {b.rule}
                           </td>
                         </tr>
@@ -302,7 +308,7 @@ export function Overview({ env }: { env?: string }) {
                   </table>
                 </div>
               ) : (
-                <EmptyState title="No blocked actions">Actions stopped by taint or invalid arguments are listed here.</EmptyState>
+                <EmptyState title="No blocked actions" />
               )}
             </Panel>
           </div>

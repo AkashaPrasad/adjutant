@@ -153,6 +153,7 @@ export interface BlockedAction {
   node_id: string
   tool: string
   rule: string
+  reason: string
   at?: string
 }
 
@@ -172,7 +173,12 @@ export async function loadBlocked(runs: Run[], limit = 8): Promise<BlockedAction
         goal: run.goal,
         node_id: item.node_id,
         tool: item.tool,
-        rule: taint.length ? `taint: ${taint.join(', ')} from untrusted content` : flags.includes('invalid_args') ? 'invalid arguments' : flags.join(', '),
+        rule: taint.length ? `taint: ${taint.join(', ')}` : flags.includes('invalid_args') ? 'invalid args' : flags.join(', '),
+        reason: taint.length
+          ? `${taint.join(', ')} came from untrusted content: ${run.goal}`
+          : typeof item.preview?.error === 'string'
+            ? `${item.preview.error}: ${run.goal}`
+            : run.goal,
         at: run.created_at,
       })
     }

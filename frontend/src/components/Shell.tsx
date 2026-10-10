@@ -286,7 +286,7 @@ const DEMO_STEPS = [
   },
   {
     title: 'One batched review',
-    body: 'Vendor follow-up: plan with Muse, shadow run, 3 of 4 actions auto-approved. Approve the email against its args hash, then execute.',
+    body: 'Vendor follow-up: 3 actions, 2 auto-approved by policy, 1 needs approval. Approve the email against its args hash, then execute.',
     to: '/new?scenario=vendor-followup',
   },
   {

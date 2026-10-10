@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { ApiError, api, errorMessage } from '../api/client'
 import type { ArgSource, PlannedAction, Scenario, ToolDef } from '../api/types'
 import { ScenarioList } from '../components/Scenarios'
+import { Disclosure } from '../components/Glyphs'
 import { useToast } from '../components/Toast'
 import { Badge, Callout, ErrorState, PageHeader, Panel, Skeleton, Spinner, Tabs, cx, toolSystem } from '../components/ui'
 import { MODEL_ID, MODEL_NAME } from '../config'
@@ -258,7 +259,7 @@ export function NewRun() {
       <PageHeader
         crumbs={[{ label: 'Runs', href: '/runs' }, { label: 'New run' }]}
         title="New run"
-        subtitle="Describe a task. Muse drafts a plan from the registered tools; the gate shadow-runs it so you review real previews before anything is written."
+        subtitle="Plan a task, then shadow-run it before anything is written."
       />
 
       <Panel title="1. Task">
@@ -284,25 +285,27 @@ export function NewRun() {
             {scenarios.initialLoading ? (
               <Skeleton rows={5} height={36} />
             ) : (
-              <ScenarioList scenarios={list ?? []} selectedId={scenario?.id} onSelect={pick} compact />
+              <ScenarioList scenarios={list ?? []} selectedId={scenario?.id} onSelect={pick} />
             )}
           </div>
         )}
         {mode === 'scenario' && scenario && (
-          <dl className="scenario-brief">
-            {scenario.pain_point && (
-              <div>
-                <dt>Pain point</dt>
-                <dd>{scenario.pain_point}</dd>
-              </div>
-            )}
-            {scenario.expected_outcome && (
-              <div>
-                <dt>Expected outcome</dt>
-                <dd>{scenario.expected_outcome}</dd>
-              </div>
-            )}
-          </dl>
+          <Disclosure summary={<span className="text-2">Pain point and expected outcome</span>}>
+            <dl className="scenario-brief">
+              {scenario.pain_point && (
+                <div>
+                  <dt>Pain point</dt>
+                  <dd>{scenario.pain_point}</dd>
+                </div>
+              )}
+              {scenario.expected_outcome && (
+                <div>
+                  <dt>Expected outcome</dt>
+                  <dd>{scenario.expected_outcome}</dd>
+                </div>
+              )}
+            </dl>
+          </Disclosure>
         )}
         <label className="field">
           <span className="field-label">Goal</span>
@@ -411,7 +414,7 @@ export function NewRun() {
         <div ref={planRef}>
           <Panel
             title="2. Plan"
-            subtitle="Edit anything before the shadow run. Each argument carries its source: the policy blocks untrusted values in a recipient, channel or record id."
+            subtitle="Untrusted values in a recipient, channel or record id are blocked."
             actions={
               origin?.kind === 'muse' ? (
                 <Badge tone="info">Drafted by {MODEL_NAME}</Badge>

@@ -40,7 +40,7 @@ export function Runs() {
     <div className="page">
       <PageHeader
         title="Runs"
-        subtitle="Every task an agent sent through the gate, newest first."
+        subtitle="Agent tasks through the gate, newest first."
         actions={
           <a href="/new" className="btn btn-primary" onClick={linkHandler('/new')}>
             New run

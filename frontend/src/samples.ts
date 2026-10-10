@@ -213,7 +213,7 @@ export const FALLBACK_SCENARIOS: Scenario[] = [
 export const MODE_LABEL: Record<string, string> = {
   approval: 'Batched review',
   taint_block: 'Taint block',
-  auto: 'Auto-approve',
+  auto: 'Auto',
   false_done: 'False done',
   exactly_once: 'Exactly once',
 }

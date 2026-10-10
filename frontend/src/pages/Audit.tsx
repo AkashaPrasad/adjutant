@@ -149,7 +149,7 @@ export function Audit() {
     <div className="page">
       <PageHeader
         title="Verify audit packet"
-        subtitle="Each run produces a signed packet: plan, policy diff, decision and reviewer, effects, verification and the full event trail. Auditors can check it without trusting the console."
+        subtitle="Check a signed run packet without trusting the console."
       />
       <div className="audit-page">
         <Panel title="Packet">

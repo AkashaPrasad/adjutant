@@ -61,8 +61,8 @@ export default function App() {
         gPressed.current = Date.now()
         return
       }
-      if (route.name === 'run') return // j/k/a/r/e are handled by the run review
-      if (e.key === 'n') navigate('/new')
+      // j/k/a/r/e belong to the run review; n stays off there so it cannot be hit mid-review.
+      if (e.key === 'n' && route.name !== 'run') navigate('/new')
       else if (e.key === 't') toggleTheme()
       else if (e.key === 'd') setDemo((v) => !v)
     }
