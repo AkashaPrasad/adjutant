@@ -7,7 +7,7 @@ import { truncateMiddle } from './ui'
 export function RunsTable({ runs, compact }: { runs: Run[]; compact?: boolean }) {
   return (
     <div className="table-wrap">
-      <table className="table table-click">
+      <table className={compact ? 'table table-click table-runs-compact' : 'table table-click'}>
         <thead>
           <tr>
             {!compact && <th scope="col">Run id</th>}

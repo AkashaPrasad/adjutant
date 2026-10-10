@@ -238,7 +238,7 @@ export function Overview({ env }: { env?: string }) {
                 </div>
               ) : pending.length ? (
                 <div className="table-wrap">
-                  <table className="table table-click">
+                  <table className="table table-click table-pending">
                     <thead>
                       <tr>
                         <th scope="col">Run</th>
@@ -280,7 +280,7 @@ export function Overview({ env }: { env?: string }) {
                 </div>
               ) : blocked.data && blocked.data.length ? (
                 <div className="table-wrap">
-                  <table className="table table-click">
+                  <table className="table table-click table-blocked">
                     <thead>
                       <tr>
                         <th scope="col">Time</th>

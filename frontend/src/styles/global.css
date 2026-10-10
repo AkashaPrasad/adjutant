@@ -1364,15 +1364,22 @@ tr:hover .hash-copy {
   width: 360px;
   max-width: calc(100vw - 32px);
 }
+/* Keep toasts above the sticky run action bar (which can wrap on narrow screens). */
 .page-review ~ .toasts,
 body:has(.run-bar) .toasts {
-  bottom: 72px;
+  bottom: 80px;
+}
+@media (max-width: 720px) {
+  .page-review ~ .toasts,
+  body:has(.run-bar) .toasts {
+    bottom: 128px;
+  }
 }
 .toast {
   display: flex;
   align-items: flex-start;
   gap: var(--space-3);
-  padding: var(--space-3) var(--space-3) var(--space-3) var(--space-4);
+  padding: var(--space-2) var(--space-3) var(--space-2) var(--space-3);
   background: var(--bg-surface);
   border: 1px solid var(--border);
   border-left: 4px solid var(--accent);
@@ -1392,10 +1399,19 @@ body:has(.run-bar) .toasts {
 }
 .toast-title {
   font-weight: 600;
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .toast-body {
   color: var(--text-2);
-  margin-top: 2px;
+  font-size: 12px;
+  line-height: 16px;
+  margin-top: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .toast-dismiss {
   font-size: 12px;
@@ -3696,4 +3712,39 @@ a.feed-row .feed-label {
 }
 .art-btn > .art {
   width: 100%;
+}
+
+/* ================================================================ narrow-screen overview tables */
+@media (max-width: 720px) {
+  /* Recent runs (compact RunsTable): drop Actions/Auto/Blocked, Goal takes the rest. */
+  .table-runs-compact th:nth-child(3),
+  .table-runs-compact td:nth-child(3),
+  .table-runs-compact th:nth-child(4),
+  .table-runs-compact td:nth-child(4),
+  .table-runs-compact th:nth-child(5),
+  .table-runs-compact td:nth-child(5) {
+    display: none;
+  }
+  .table-runs-compact .cell-goal,
+  .table-pending .cell-truncate,
+  .table-blocked .cell-truncate {
+    min-width: 140px;
+  }
+  .table-runs-compact td:nth-child(2) {
+    max-width: 98px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .table-runs-compact td:nth-child(2) > * {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    vertical-align: middle;
+  }
+  .table-runs-compact td,
+  .table-blocked td,
+  .table-pending td {
+    padding-left: 8px;
+    padding-right: 8px;
+  }
 }

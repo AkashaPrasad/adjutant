@@ -45,14 +45,17 @@ type Busy = null | 'submit' | 'reject' | 'execute' | 'undo' | 'edit' | 'audit' |
 
 const stageKey = (it: RunItem) => `${it.node_id}:${it.args_hash}`
 
-function sortForReview(items: RunItem[]): RunItem[] {
-  const rank = (it: RunItem) => {
-    const d = gateDecision(it)
-    if (it.status === 'pending_approval') return 0
-    if (d === 'block') return 1
-    return 2
-  }
-  return [...items].sort((a, b) => rank(a) - rank(b) || (a.seq ?? 0) - (b.seq ?? 0))
+function bySeq(items: RunItem[]): RunItem[] {
+  return [...items].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
+}
+
+/** Default selection: first blocked action, then first needing approval, then the first row. */
+function pickAttention(items: RunItem[]): RunItem | undefined {
+  return (
+    items.find((it) => gateDecision(it) === 'block' || it.status === 'blocked') ??
+    items.find((it) => it.status === 'pending_approval') ??
+    items[0]
+  )
 }
 
 /* ------------------------------------------------------------------------------------------ */
@@ -146,8 +149,8 @@ export function RunReview({ id }: { id: string }) {
 
   const items = useMemo(() => run?.items ?? [], [run])
   const inReview = REVIEW.has(status)
-  const ordered = useMemo(() => (inReview ? sortForReview(items) : [...items].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))), [items, inReview])
-  const selected = ordered.find((i) => i.node_id === selectedId) ?? ordered[0]
+  const ordered = useMemo(() => bySeq(items), [items])
+  const selected = ordered.find((i) => i.node_id === selectedId) ?? (inReview ? pickAttention(ordered) : ordered[0])
 
   // Drop staged decisions whose hash no longer exists (an edit re-gated the item).
   const hashSig = items.map(stageKey).join('|')
@@ -195,7 +198,7 @@ export function RunReview({ id }: { id: string }) {
     (it: RunItem, v: 'approve' | 'reject') => {
       if (it.status !== 'pending_approval') return
       setStaged((p) => ({ ...p, [stageKey(it)]: v }))
-      const next = sortForReview(items).find((x) => x.status === 'pending_approval' && x.node_id !== it.node_id && !staged[stageKey(x)])
+      const next = bySeq(items).find((x) => x.status === 'pending_approval' && x.node_id !== it.node_id && !staged[stageKey(x)])
       if (next) setSelectedId(next.node_id)
     },
     [items, staged],
