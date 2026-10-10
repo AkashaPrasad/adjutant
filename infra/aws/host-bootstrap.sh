@@ -1,24 +1,31 @@
 #!/usr/bin/env bash
-# Adjutant Gate backend host bootstrap (Ubuntu 24.04, arm64). Runs once as EC2 user-data.
+# Adjutant Gate backend host bootstrap (Ubuntu 24.04). Runs once as EC2 user-data.
 # Installs Caddy (automatic HTTPS), uv, the API service and a signed deploy hook.
 # Contains no secrets. The host trusts deploy requests signed by the Ed25519 key whose public
 # half is embedded below (infra/aws/deploy-signing.pub). Application secrets arrive over HTTPS
 # inside each signed deploy from GitHub Actions.
+# Lightsail may run user-data through /bin/sh (dash): re-exec under bash before any bash-only syntax.
+if [ -z "${BASH_VERSION:-}" ]; then exec /bin/bash "$0" "$@"; fi
 set -euxo pipefail
 exec > >(tee -a /var/log/adjutant-bootstrap.log) 2>&1
 
 API_DOMAIN="${API_DOMAIN:-api.adjutant.spacesdrive.cc}"
 REPO_URL="${REPO_URL:-https://github.com/AkashaPrasad/adjutant.git}"
 export DEBIAN_FRONTEND=noninteractive
+export HOME="${HOME:-/root}"  # cloud-init may run user-data without HOME; the uv installer needs it
 # First boot: wait for cloud-init / unattended-upgrades to release the dpkg lock instead of failing.
 echo 'DPkg::Lock::Timeout "600";' > /etc/apt/apt.conf.d/99adjutant-lock-timeout
+# Give provisioning a moment to attach the static IP (that swaps the public NAT address), and
+# never let a download hang forever.
+sleep "${BOOT_SETTLE_SECONDS:-30}"
+printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' > /etc/apt/apt.conf.d/99adjutant-net
+fetch() { curl -1sSLf --connect-timeout 15 --max-time 300 --retry 5 --retry-all-errors --retry-delay 5 "$@"; }
 
 apt-get update -y
-apt-get install -y git curl ca-certificates debian-keyring debian-archive-keyring apt-transport-https python3 python3-cryptography sqlite3 gnupg
-curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/gpg.key | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt > /etc/apt/sources.list.d/caddy-stable.list
-apt-get update -y && apt-get install -y caddy
-curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin UV_NO_MODIFY_PATH=1 sh
+# Caddy comes from Ubuntu's own archive (universe): the Cloudsmith Caddy repo now answers 402.
+apt-get install -y git curl ca-certificates python3 python3-cryptography sqlite3 caddy
+install -d /etc/caddy
+fetch https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin UV_NO_MODIFY_PATH=1 sh
 
 id adjutant >/dev/null 2>&1 || useradd --system --create-home --home-dir /var/lib/adjutant --shell /usr/sbin/nologin adjutant
 install -d -o adjutant -g adjutant -m 750 /var/lib/adjutant/data /opt/adjutant

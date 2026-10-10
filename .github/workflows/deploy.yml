@@ -3,6 +3,9 @@ name: Deploy to production
 # Every push to main is tested, then shipped:
 #   backend  -> AWS Lightsail host (signed deploy hook)  https://api.adjutant.spacesdrive.cc
 #   frontend -> Cloudflare Pages                          https://adjutant.spacesdrive.cc
+# The dns/backend/frontend jobs run only when the repository variable DEPLOY_ENABLED is 'true'
+# (set by infra/setup-github-secrets.sh after it stores the secrets). Without it they are skipped,
+# CI still runs, and the workflow stays green. Until then, deploy with infra/deploy-local.sh.
 on:
   push:
     branches: [main]
@@ -16,10 +19,12 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  API_DOMAIN: ${{ vars.API_DOMAIN }}
-  FRONTEND_DOMAIN: ${{ vars.FRONTEND_DOMAIN }}
-  PAGES_PROJECT: ${{ vars.PAGES_PROJECT }}
-  DNS_ZONE: ${{ vars.DNS_ZONE }}
+  API_DOMAIN: ${{ vars.API_DOMAIN || 'api.adjutant.spacesdrive.cc' }}
+  FRONTEND_DOMAIN: ${{ vars.FRONTEND_DOMAIN || 'adjutant.spacesdrive.cc' }}
+  PAGES_PROJECT: ${{ vars.PAGES_PROJECT || 'adjutant' }}
+  PAGES_HOST: ${{ vars.PAGES_HOST || 'adjutant-cxd.pages.dev' }}
+  DNS_ZONE: ${{ vars.DNS_ZONE || 'spacesdrive.cc' }}
+  BACKEND_IP: ${{ vars.BACKEND_IP || '13.232.187.107' }}
 
 jobs:
   ci:
@@ -27,21 +32,23 @@ jobs:
 
   dns:
     name: DNS (Cloudflare)
+    if: ${{ vars.DEPLOY_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - name: API record points at the AWS host (DNS only, so Caddy can issue TLS)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: infra/cloudflare/ensure-dns.sh "$API_DOMAIN" A "${{ vars.BACKEND_IP }}" false
+        run: infra/cloudflare/ensure-dns.sh "$API_DOMAIN" A "$BACKEND_IP" false
 
   backend:
     name: Backend -> AWS
     needs: [ci, dns]
+    if: ${{ vars.DEPLOY_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     environment:
       name: production-api
-      url: https://${{ vars.API_DOMAIN }}/health
+      url: https://${{ env.API_DOMAIN }}/health
     steps:
       - uses: actions/checkout@v5
       - name: Signed deploy and health check
@@ -49,16 +56,17 @@ jobs:
           DEPLOY_SIGNING_KEY: ${{ secrets.DEPLOY_SIGNING_KEY }}
           MUSE_API_KEY: ${{ secrets.MUSE_API_KEY }}
           ADJUTANT_SIGNING_KEY: ${{ secrets.ADJUTANT_SIGNING_KEY }}
-          ALLOWED_ORIGINS: https://${{ vars.FRONTEND_DOMAIN }},https://${{ vars.PAGES_PROJECT }}.pages.dev,http://localhost:5173
+          ALLOWED_ORIGINS: https://${{ env.FRONTEND_DOMAIN }},https://${{ env.PAGES_HOST }},http://localhost:5173
         run: infra/deploy-backend.sh "$GITHUB_SHA"
 
   frontend:
     name: Frontend -> Cloudflare Pages
     needs: [ci]
+    if: ${{ vars.DEPLOY_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     environment:
       name: production-web
-      url: https://${{ vars.FRONTEND_DOMAIN }}
+      url: https://${{ env.FRONTEND_DOMAIN }}
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -72,7 +80,7 @@ jobs:
       - name: Build
         working-directory: frontend
         env:
-          VITE_API_BASE: https://${{ vars.API_DOMAIN }}
+          VITE_API_BASE: https://${{ env.API_DOMAIN }}
           VITE_GIT_SHA: ${{ github.sha }}
         run: |
           npm ci
