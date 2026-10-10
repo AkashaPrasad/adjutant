@@ -1,0 +1,83 @@
+name: Deploy to production
+
+# Every push to main is tested, then shipped:
+#   backend  -> AWS Lightsail host (signed deploy hook)  https://api.adjutant.spacesdrive.cc
+#   frontend -> Cloudflare Pages                          https://adjutant.spacesdrive.cc
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production
+  cancel-in-progress: false
+
+env:
+  API_DOMAIN: ${{ vars.API_DOMAIN }}
+  FRONTEND_DOMAIN: ${{ vars.FRONTEND_DOMAIN }}
+  PAGES_PROJECT: ${{ vars.PAGES_PROJECT }}
+  DNS_ZONE: ${{ vars.DNS_ZONE }}
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  dns:
+    name: DNS (Cloudflare)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: API record points at the AWS host (DNS only, so Caddy can issue TLS)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: infra/cloudflare/ensure-dns.sh "$API_DOMAIN" A "${{ vars.BACKEND_IP }}" false
+
+  backend:
+    name: Backend -> AWS
+    needs: [ci, dns]
+    runs-on: ubuntu-latest
+    environment:
+      name: production-api
+      url: https://${{ vars.API_DOMAIN }}/health
+    steps:
+      - uses: actions/checkout@v4
+      - name: Signed deploy and health check
+        env:
+          DEPLOY_SIGNING_KEY: ${{ secrets.DEPLOY_SIGNING_KEY }}
+          MUSE_API_KEY: ${{ secrets.MUSE_API_KEY }}
+          ADJUTANT_SIGNING_KEY: ${{ secrets.ADJUTANT_SIGNING_KEY }}
+          ALLOWED_ORIGINS: https://${{ vars.FRONTEND_DOMAIN }},https://${{ vars.PAGES_PROJECT }}.pages.dev,http://localhost:5173
+        run: infra/deploy-backend.sh "$GITHUB_SHA"
+
+  frontend:
+    name: Frontend -> Cloudflare Pages
+    needs: [ci]
+    runs-on: ubuntu-latest
+    environment:
+      name: production-web
+      url: https://${{ vars.FRONTEND_DOMAIN }}
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build
+        working-directory: frontend
+        env:
+          VITE_API_BASE: https://${{ vars.API_DOMAIN }}
+          VITE_GIT_SHA: ${{ github.sha }}
+        run: |
+          npm ci
+          VITE_BUILD_TIME="$(date -u +%FT%TZ)" npm run build
+      - name: Ensure Pages project and custom domain
+        run: infra/cloudflare/ensure-pages.sh "$PAGES_PROJECT" "$FRONTEND_DOMAIN"
+      - name: Publish
+        run: npx --yes wrangler@4 pages deploy frontend/dist --project-name "$PAGES_PROJECT" --branch main --commit-hash "$GITHUB_SHA" --commit-dirty=true
