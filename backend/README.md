@@ -44,6 +44,11 @@ Tests never touch the network: the Muse client is exercised with `httpx.MockTran
 | `ADJUTANT_SIGNING_KEY` | dev key (warns) | HMAC-SHA256 key for audit packets. Set in production. |
 | `ALLOWED_ORIGINS` | `*` | Comma-separated CORS origins. |
 | `GIT_SHA`, `DEPLOYED_AT`, `APP_ENV` | `dev`, null, `development` | Reported by `/health`. |
+| `MUSE_REASONING_EFFORT` / `MUSE_VERIFY_REASONING_EFFORT` | `low` / `minimal` | Reasoning effort for planning / verification. |
+| `MUSE_TIMEOUT_S`, `MUSE_MAX_RETRIES` | `30`, `2` | Per-attempt HTTP timeout and retries for Muse. |
+| `PLAN_BUDGET_S`, `VERIFY_BUDGET_S` | `45`, `20` | Wall-clock budgets. Plan -> `504 llm_timeout`; verify -> deterministic fallback. |
+| `PLAN_HEDGE_S`, `VERIFY_HEDGE_S` | `12`, `8` | Fire a second identical Muse request if the first has not answered by then (0 disables). |
+| `REQUEST_TIMEOUT_S` | `90` | Backstop for every request (`504 timeout`). |
 
 ## How it works
 
@@ -70,7 +75,7 @@ Tests never touch the network: the Muse client is exercised with `httpx.MockTran
 Tools are simulated sandbox adapters (`app/tools.py`) with state in SQLite:
 `email.send` (irreversible), `slack.post` (undo: delete), `crm.update` (undo: restore previous values),
 `calendar.create_event` (undo: cancel), `http.get` (read; sandboxed pages, content untrusted), `docs.search` (read).
-Seeded CRM records: `acct-1001`, `acct-1002`, `acct-1003`.
+Seeded CRM records: `acct-1001`..`acct-1004`; seeded inbox: `inb-2291` (injected bank-detail email), `inb-4417`.
 
 ## API
 
@@ -92,7 +97,13 @@ All errors: `{"error": {"code", "message"}}`.
 | POST | `/v1/audit/verify` | `{packet, signature}` -> `{valid}` |
 | GET | `/v1/ledger?limit=` | Recent effects across runs |
 | GET | `/v1/stats` | Runs by status, effects, prompts avoided |
-| GET | `/v1/sandbox` | Current sandbox state (outbox, Slack, CRM, calendar) |
+| GET | `/v1/sandbox` | Current sandbox state (outbox, Slack, CRM, calendar, inbox) |
+| GET | `/v1/activity?limit=` | Events across runs, newest first |
+| GET | `/v1/scenarios` | Five demo scenarios with pre-built plans |
+| POST | `/v1/scenarios/{id}/run` | Create a run from a scenario |
+| POST | `/v1/demo/reset` | `{seed?}`: wipe and re-seed; optionally add ~8 historical runs |
+
+Full response shapes with examples: [`docs/API.md`](../docs/API.md).
 
 Example:
 

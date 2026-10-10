@@ -11,9 +11,11 @@ Item lifecycle:
 
 from __future__ import annotations
 
+import contextlib
 import secrets
 import sqlite3
 import threading
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from . import sandbox
@@ -255,10 +257,16 @@ class Gate:
                 run = self._run_row(conn, run_id)
                 if run["status"] == "rejected":
                     raise conflict("invalid_state", "run was rejected; nothing will be executed")
-                if run["status"] in TERMINAL:
+                if run["status"] in TERMINAL or run["status"] == "executing":
+                    # Exactly-once: a repeated execute never re-runs effects; it replays the ledger.
+                    count = conn.execute("SELECT COUNT(*) FROM effects WHERE run_id = ?", (run_id,)).fetchone()[0]
+                    self._event(
+                        conn,
+                        run_id,
+                        "execute.replayed",
+                        {"status": run["status"], "effects": count, "new_effects": 0},
+                    )
                     return False
-                if run["status"] == "executing":
-                    raise conflict("execution_in_progress", "run is already executing")
                 if run["status"] != "approved":
                     raise conflict("not_approved", f"run is {run['status']}; it must be approved before execution")
                 self._set_run(conn, run_id, status="executing")
@@ -370,7 +378,11 @@ class Gate:
                 if tool is None or tool.kind == "read":
                     continue
                 if not tool.reversible:
-                    undo_status, undo_result = "not_reversible", {"reason": f"{tool.name} cannot be undone"}
+                    undo_status = "not_reversible"
+                    try:
+                        undo_result = tool.refuse_undo(conn, effect["args"], effect["result"] or {})
+                    except Exception:
+                        undo_result = {"reversible": False, "reason": f"{tool.name} cannot be undone"}
                 else:
                     conn.execute("SAVEPOINT undo")
                     try:
@@ -514,7 +526,7 @@ class Gate:
     def ledger(self, limit: int) -> list[dict[str, Any]]:
         with self.db.connect() as conn:
             rows = conn.execute("SELECT * FROM effects ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
-            return [self._effect(r) for r in rows]
+            return [self._effect_full(r) for r in rows]
 
     def stats(self) -> dict[str, Any]:
         with self.db.connect() as conn:
@@ -529,20 +541,149 @@ class Gate:
             items = conn.execute(
                 "SELECT COUNT(*) AS total, SUM(approval_mode = 'policy') AS auto,"
                 " SUM(approval_mode = 'human') AS human, SUM(decision_required) AS gated,"
-                " SUM(flags LIKE '%\"taint:%') AS taint FROM run_items"
+                " SUM(flags LIKE '%\"taint:%') AS taint, SUM(status = 'blocked') AS blocked FROM run_items"
             ).fetchone()
+            verif = conn.execute(
+                "SELECT SUM(json_extract(verification, '$.passed') = 1) AS ok,"
+                " SUM(json_extract(verification, '$.passed') = 0) AS bad FROM runs WHERE verification IS NOT NULL"
+            ).fetchone()
+            by_tool = {
+                r[0]: r[1]
+                for r in conn.execute(
+                    "SELECT tool, COUNT(*) FROM effects WHERE status = 'executed' GROUP BY tool ORDER BY 2 DESC, 1"
+                )
+            }
+            today = datetime.now(UTC).date()
+            days = [(today - timedelta(days=d)).isoformat() for d in range(6, -1, -1)]
+            runs_per_day = dict(
+                conn.execute(
+                    "SELECT substr(created_at, 1, 10) AS day, COUNT(*) FROM runs WHERE day >= ? GROUP BY day",
+                    (days[0],),
+                ).fetchall()
+            )
+            avoided_per_day = dict(
+                conn.execute(
+                    "SELECT substr(r.created_at, 1, 10) AS day, COUNT(*)"
+                    " FROM run_items i JOIN runs r ON r.id = i.run_id"
+                    " WHERE i.approval_mode = 'policy' AND day >= ? GROUP BY day",
+                    (days[0],),
+                ).fetchall()
+            )
+        runs_total = sum(by_status.values())
+        actions_total = items["total"] or 0
         return {
-            "runs_total": sum(by_status.values()),
+            "runs_total": runs_total,
             "runs_by_status": by_status,
             "effects_total": sum(effects.values()),
             "effects_by_status": effects,
             "undo_by_status": undo,
-            "actions_total": items["total"] or 0,
+            "actions_total": actions_total,
             "prompts_avoided": items["auto"] or 0,
             "human_approvals": items["human"] or 0,
             "approvals_required": items["gated"] or 0,
             "taint_blocks": items["taint"] or 0,
+            "verified_runs": verif["ok"] or 0,
+            "verification_failed_runs": verif["bad"] or 0,
+            "effects_compensated": undo.get("compensated", 0),
+            "blocked_items": items["blocked"] or 0,
+            "avg_actions_per_run": round(actions_total / runs_total, 2) if runs_total else 0,
+            "runs_last_7d": [
+                {"day": d, "runs": runs_per_day.get(d, 0), "prompts_avoided": avoided_per_day.get(d, 0)} for d in days
+            ],
+            "by_tool": by_tool,
         }
+
+    def activity(self, limit: int) -> list[dict[str, Any]]:
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                "SELECT e.id, e.run_id, e.type, e.data, e.created_at, r.goal FROM events e"
+                " LEFT JOIN runs r ON r.id = e.run_id ORDER BY e.created_at DESC, e.id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "run_id": r["run_id"],
+                "goal": r["goal"],
+                "type": r["type"],
+                "at": r["created_at"],
+                "data": loads(r["data"]),
+            }
+            for r in rows
+        ]
+
+    # ------------------------------------------------------------------------------------------
+    # Demo support
+    # ------------------------------------------------------------------------------------------
+    def reset(self) -> None:
+        """Wipe runs, ledger, events and sandbox state; re-seed the sandbox."""
+        with self._lock, self.db.transaction() as conn:
+            for table in ("events", "effects", "run_items", "runs", "sandbox_objects"):
+                conn.execute(f"DELETE FROM {table}")
+            conn.execute("DELETE FROM sqlite_sequence WHERE name IN ('events', 'effects')")
+            sandbox.reset(conn)
+
+    def backdate(self, run_id: str, since: str, hours_ago: float) -> None:
+        """Shift a run (and the sandbox objects it created after `since`) back in time, for demo history."""
+        delta = timedelta(hours=hours_ago)
+
+        def shift(ts: str | None) -> str | None:
+            if not ts:
+                return ts
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00")) - delta
+            return dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+        def shift_fields(obj: Any) -> Any:
+            if not isinstance(obj, dict):
+                return obj
+            out = dict(obj)
+            for k, v in obj.items():
+                if k.endswith("_at") and isinstance(v, str):
+                    with contextlib.suppress(ValueError):
+                        out[k] = shift(v)
+            return out
+
+        with self._lock, self.db.transaction() as conn:
+            row = self._run_row(conn, run_id)
+            conn.execute(
+                "UPDATE runs SET created_at = ?, updated_at = ? WHERE id = ?",
+                (shift(row["created_at"]), shift(row["updated_at"]), run_id),
+            )
+            for r in conn.execute("SELECT id, created_at FROM events WHERE run_id = ?", (run_id,)).fetchall():
+                conn.execute("UPDATE events SET created_at = ? WHERE id = ?", (shift(r["created_at"]), r["id"]))
+            for r in conn.execute(
+                "SELECT id, created_at, undone_at, result, undo_result FROM effects WHERE run_id = ?", (run_id,)
+            ).fetchall():
+                conn.execute(
+                    "UPDATE effects SET created_at = ?, undone_at = ?, result = ?, undo_result = ? WHERE id = ?",
+                    (
+                        shift(r["created_at"]),
+                        shift(r["undone_at"]),
+                        r["result"] and dumps(shift_fields(loads(r["result"]))),
+                        r["undo_result"] and dumps(shift_fields(loads(r["undo_result"]))),
+                        r["id"],
+                    ),
+                )
+            undo = loads(row["undo"])
+            if undo:
+                conn.execute("UPDATE runs SET undo = ? WHERE id = ?", (dumps(shift_fields(undo)), run_id))
+            for key in ("decision", "verification"):
+                value = loads(row[key])
+                if value:
+                    conn.execute(f"UPDATE runs SET {key} = ? WHERE id = ?", (dumps(shift_fields(value)), run_id))
+            for r in conn.execute(
+                "SELECT kind, id, data, created_at, updated_at FROM sandbox_objects WHERE created_at >= ?", (since,)
+            ).fetchall():
+                conn.execute(
+                    "UPDATE sandbox_objects SET data = ?, created_at = ?, updated_at = ? WHERE kind = ? AND id = ?",
+                    (
+                        dumps(shift_fields(loads(r["data"]))),
+                        shift(r["created_at"]),
+                        shift(r["updated_at"]),
+                        r["kind"],
+                        r["id"],
+                    ),
+                )
 
     def sandbox_state(self) -> dict[str, Any]:
         with self.db.connect() as conn:
@@ -604,9 +745,16 @@ class Gate:
             "undone_at": r["undone_at"],
         }
 
+    def _effect_full(self, r: sqlite3.Row) -> dict[str, Any]:
+        e = self._effect(r)
+        tool = self.registry.get(e["tool"])
+        e["reversible"] = tool.reversible if tool else None
+        e["compensation"] = e["undo_result"]
+        return e
+
     def _effects(self, conn: sqlite3.Connection, run_id: str) -> list[dict[str, Any]]:
         rows = conn.execute("SELECT * FROM effects WHERE run_id = ? ORDER BY id", (run_id,)).fetchall()
-        return [self._effect(r) for r in rows]
+        return [self._effect_full(r) for r in rows]
 
     def _serialize(self, conn: sqlite3.Connection, run_id: str) -> dict[str, Any]:
         row = self._run_row(conn, run_id)
@@ -630,7 +778,15 @@ class Gate:
             "verification": loads(row["verification"]),
             "undo": loads(row["undo"]),
             "effects": self._effects(conn, run_id),
+            "events": self._events(conn, run_id),
         }
+
+    @staticmethod
+    def _events(conn: sqlite3.Connection, run_id: str) -> list[dict[str, Any]]:
+        return [
+            {"id": r["id"], "type": r["type"], "at": r["created_at"], "data": loads(r["data"])}
+            for r in conn.execute("SELECT * FROM events WHERE run_id = ? ORDER BY id", (run_id,))
+        ]
 
     _RUN_COLUMNS = frozenset({"status", "decision", "verification", "undo"})
     _ITEM_COLUMNS = frozenset(

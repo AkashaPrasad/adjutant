@@ -1,9 +1,13 @@
 """Async client for Meta Muse Spark 1.3 Contributor (OpenAI-compatible Chat Completions).
 
-API notes: reasoning model (`reasoning_effort` minimal|low|medium|high), `max_completion_tokens`
-instead of `max_tokens`, and `stream`/`stop`/`n`/`logprobs` are rejected. Structured output uses
-response_format={"type": "json_schema"}; if the server rejects the schema we retry once with the
-schema in the prompt and parse JSON out of the text.
+API notes (verified against the live endpoint): reasoning model (`reasoning_effort`
+minimal|low|medium|high). Reasoning tokens are billed against `max_completion_tokens`, so a small
+budget yields content=null with finish_reason="length"; we keep the budget generous and, if that still
+happens, retry once with a doubled budget and `reasoning_effort="minimal"`. `stream`/`stop`/`n`/
+`logprobs` are rejected. Structured output uses response_format={"type": "json_schema"} (non-strict;
+strict mode requires additionalProperties=false everywhere); if the server rejects the schema we retry
+once with the schema in the prompt and parse JSON out of the text. Callers wrap calls in
+`asyncio.wait_for` with a wall-clock budget; each HTTP attempt is also capped by `timeout_s`.
 """
 
 from __future__ import annotations
@@ -12,6 +16,7 @@ import asyncio
 import json
 import random
 import re
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
@@ -19,6 +24,33 @@ import httpx
 from .config import Settings
 
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504, 529})
+
+
+async def hedged[T](factory: Callable[[], Awaitable[T]], hedge_after_s: float) -> T:
+    """Start one call; if it has not finished after `hedge_after_s`, start an identical second call and return
+    whichever succeeds first. Cuts tail latency of a reasoning model with high variance. The caller still
+    bounds the whole thing with asyncio.wait_for."""
+    if hedge_after_s <= 0:
+        return await factory()
+    tasks = {asyncio.ensure_future(factory())}
+    try:
+        done, _ = await asyncio.wait(tasks, timeout=hedge_after_s)
+        if not done:
+            tasks.add(asyncio.ensure_future(factory()))
+        pending = set(tasks)
+        error: BaseException | None = None
+        while pending:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                if task.exception() is None:
+                    return task.result()
+                error = task.exception()
+        assert error is not None
+        raise error
+    finally:  # also runs when the caller's wait_for cancels us: never leak an in-flight request
+        for task in tasks:
+            if not task.done():
+                task.cancel()
 
 
 class LLMUnavailable(RuntimeError):
@@ -59,8 +91,8 @@ class MuseClient:
         api_key: str,
         base_url: str,
         model: str,
-        timeout_s: float = 90.0,
-        max_retries: int = 4,
+        timeout_s: float = 30.0,
+        max_retries: int = 2,
         backoff_base_s: float = 1.0,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
@@ -115,13 +147,20 @@ class MuseClient:
         headers = {"Authorization": f"Bearer {self.api_key}"}
         attempt = 0
         last_error = "no attempt made"
+        widened = False
         async with httpx.AsyncClient(timeout=self.timeout_s, transport=self._transport) as client:
             while True:
                 resp: httpx.Response | None = None
                 try:
                     resp = await client.post(self.url, json=payload, headers=headers)
-                except httpx.TransportError as e:
-                    last_error = f"transport error: {e}"
+                except httpx.TransportError as e:  # includes timeouts
+                    last_error = f"transport error: {e.__class__.__name__}: {e}"
+                if resp is not None and resp.status_code == 200 and not widened and self._truncated(resp):
+                    # Reasoning consumed the whole completion budget: retry once with more room, less thinking.
+                    widened = True
+                    payload["max_completion_tokens"] = max_completion_tokens * 2
+                    payload["reasoning_effort"] = "minimal"
+                    continue
                 if resp is not None:
                     body = resp.text
                     if (
@@ -149,6 +188,15 @@ class MuseClient:
                 attempt += 1
 
     @staticmethod
+    def _truncated(resp: httpx.Response) -> bool:
+        try:
+            choice = resp.json()["choices"][0]
+        except (ValueError, KeyError, IndexError, TypeError):
+            return False
+        content = (choice.get("message") or {}).get("content")
+        return choice.get("finish_reason") == "length" and not (content and content.strip())
+
+    @staticmethod
     def _parse(resp: httpx.Response) -> Any:
         if resp.status_code >= 400:
             raise LLMError(f"Muse API returned HTTP {resp.status_code}: {resp.text[:300]}")
@@ -157,5 +205,5 @@ class MuseClient:
         except (ValueError, KeyError, IndexError, TypeError) as e:
             raise LLMError("unexpected response shape from Muse API") from e
         if not content:
-            raise LLMError("Muse API returned an empty completion")
+            raise LLMError("Muse API returned an empty completion (reasoning may have used the token budget)")
         return extract_json(content)

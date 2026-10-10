@@ -36,6 +36,10 @@ class ArgSpec:
     description: str = ""
 
 
+def _now() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{secrets.token_hex(6)}"
 
@@ -75,6 +79,11 @@ class Tool:
 
     def compensate(self, conn: sqlite3.Connection, args: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
         raise ToolError(f"{self.name} is not reversible")
+
+    def refuse_undo(self, conn: sqlite3.Connection, args: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+        """Called by undo for irreversible effects: record why, and what a human should do instead."""
+        reason = f"{self.name} cannot be undone"
+        return {"reversible": False, "reason": reason, "message": f"{reason}."}
 
     def verify(self, conn: sqlite3.Connection, args: dict[str, Any], result: dict[str, Any]) -> bool:
         return True
@@ -155,13 +164,27 @@ class EmailSend(Tool):
     def execute(self, conn, args):
         message_id = _new_id("msg")
         data = {
+            "from": f"ops@{INTERNAL_DOMAIN}",
             "to": _emails(args["to"], "to"),
             "cc": _emails(args["cc"], "cc") if args.get("cc") else [],
             "subject": args["subject"],
             "body": args["body"],
+            "sent_at": _now(),
         }
         sandbox.insert(conn, "email", message_id, data, "sent")
-        return {"message_id": message_id, "status": "sent", "to": data["to"]}
+        return {"message_id": message_id, "status": "sent", "to": data["to"], "sent_at": data["sent_at"]}
+
+    def refuse_undo(self, conn, args, result):
+        to = ", ".join(_emails(args["to"], "to"))
+        message = (
+            f"Email {result.get('message_id')} to {to} was already delivered and cannot be recalled. "
+            "Send a correction or follow-up instead."
+        )
+        obj = sandbox.get(conn, "email", result.get("message_id", ""))
+        if obj is not None:
+            data = {**obj["data"], "recall": "not_possible", "recall_note": message}
+            sandbox.update(conn, "email", obj["id"], data=data)
+        return {"reversible": False, "reason": "email.send cannot be undone", "message": message}
 
     def verify(self, conn, args, result):
         obj = sandbox.get(conn, "email", result.get("message_id", ""))
@@ -189,12 +212,24 @@ class SlackPost(Tool):
 
     def execute(self, conn, args):
         message_id = _new_id("slk")
-        sandbox.insert(conn, "slack_message", message_id, {"channel": args["channel"], "text": args["text"]}, "posted")
-        return {"message_id": message_id, "status": "posted", "channel": args["channel"]}
+        data = {"channel": args["channel"], "text": args["text"], "author": "adjutant-bot", "posted_at": _now()}
+        sandbox.insert(conn, "slack_message", message_id, data, "posted")
+        return {
+            "message_id": message_id,
+            "status": "posted",
+            "channel": args["channel"],
+            "posted_at": data["posted_at"],
+        }
 
     def compensate(self, conn, args, result):
-        sandbox.update(conn, "slack_message", result["message_id"], status="deleted")
-        return {"message_id": result["message_id"], "status": "deleted"}
+        obj = sandbox.get(conn, "slack_message", result["message_id"])
+        data = {**(obj["data"] if obj else {}), "deleted_at": _now()}
+        sandbox.update(conn, "slack_message", result["message_id"], data=data, status="deleted")
+        return {
+            "message_id": result["message_id"],
+            "status": "deleted",
+            "message": f"Deleted Slack message {result['message_id']} from {args['channel']}.",
+        }
 
     def verify(self, conn, args, result):
         obj = sandbox.get(conn, "slack_message", result.get("message_id", ""))
@@ -254,7 +289,13 @@ class CrmUpdate(Tool):
             else:
                 data[key] = value
         sandbox.update(conn, "crm_record", result["record_id"], data=data)
-        return {"record_id": result["record_id"], "restored": result["previous"]}
+        restored = ", ".join(f"{k}={v!r}" for k, v in result["previous"].items())
+        return {
+            "record_id": result["record_id"],
+            "restored": result["previous"],
+            "status": "restored",
+            "message": f"Restored {result['record_id']} fields: {restored}.",
+        }
 
     def verify(self, conn, args, result):
         record = sandbox.get(conn, "crm_record", args["record_id"])
@@ -315,13 +356,21 @@ class CalendarCreateEvent(Tool):
             "end": end.isoformat(),
             "attendees": _emails(args["attendees"], "attendees"),
             "description": args.get("description") or "",
+            "organizer": f"ops@{INTERNAL_DOMAIN}",
         }
         sandbox.insert(conn, "calendar_event", event_id, data, "confirmed")
         return {"event_id": event_id, "status": "confirmed", "start": data["start"], "end": data["end"]}
 
     def compensate(self, conn, args, result):
-        sandbox.update(conn, "calendar_event", result["event_id"], status="cancelled")
-        return {"event_id": result["event_id"], "status": "cancelled"}
+        obj = sandbox.get(conn, "calendar_event", result["event_id"])
+        data = {**(obj["data"] if obj else {}), "cancelled_at": _now()}
+        sandbox.update(conn, "calendar_event", result["event_id"], data=data, status="cancelled")
+        attendees = _emails(args["attendees"], "attendees")
+        return {
+            "event_id": result["event_id"],
+            "status": "cancelled",
+            "message": f"Cancelled '{args['title']}'; cancellation sent to {len(attendees)} attendee(s).",
+        }
 
     def verify(self, conn, args, result):
         obj = sandbox.get(conn, "calendar_event", result.get("event_id", ""))

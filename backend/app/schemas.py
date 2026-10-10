@@ -61,3 +61,7 @@ class EditRequest(BaseModel):
 class AuditVerifyRequest(BaseModel):
     packet: dict[str, Any]
     signature: str = Field(min_length=1, max_length=256)
+
+
+class ResetRequest(BaseModel):
+    seed: bool = False
