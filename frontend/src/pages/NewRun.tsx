@@ -1,633 +1,635 @@
-import { useEffect, useMemo, useState } from 'react'
-import {
-  ArrowRight,
-  BookOpen,
-  CheckCircle2,
-  Eye,
-  FileSignature,
-  Lock,
-  Plus,
-  RotateCcw,
-  ShieldCheck,
-  Sparkles,
-  Trash2,
-  Zap,
-} from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { ApiError, api, errorMessage } from '../api/client'
-import type { ArgSource, Health, PlannedAction, ToolDef } from '../api/types'
-import { Badge } from '../components/Badge'
+import type { ArgSource, PlannedAction, Scenario, ToolDef } from '../api/types'
+import { ScenarioList } from '../components/Scenarios'
 import { useToast } from '../components/Toast'
-import { Callout, ErrorState, Skeleton, Spinner } from '../components/ui'
-import { useAsync, useDocumentTitle } from '../lib/hooks'
-import { navigate } from '../lib/router'
+import { Badge, Callout, ErrorState, PageHeader, Panel, Skeleton, Spinner, Tabs, cx, toolSystem } from '../components/ui'
+import { MODEL_ID, MODEL_NAME } from '../config'
+import { useScenarios } from '../lib/data'
+import { useAsync, useDocumentTitle, useElapsed } from '../lib/hooks'
+import { navigate, useSearchParam } from '../lib/router'
 import { runCache } from '../lib/runCache'
-import { SAMPLES, resolveTool } from '../samples'
 
-interface DraftAction {
-  uid: number
-  node_id: string
-  tool: string
-  argsText: string
-  arg_sources: Record<string, ArgSource>
-}
-
-interface Draft {
-  goal: string
-  actions: DraftAction[]
-  done: string[]
-  autoApprove: boolean
-}
-
-const STORAGE_KEY = 'adjutant.draft.v1'
-let uidSeq = 1
-
-function emptyDraft(): Draft {
-  return { goal: '', actions: [], done: [''], autoApprove: false }
-}
-
-function loadDraft(): Draft {
-  try {
-    const raw = sessionStorage.getItem(STORAGE_KEY)
-    if (!raw) return emptyDraft()
-    const d = JSON.parse(raw) as Draft
-    d.actions = (d.actions || []).map((a) => ({ ...a, uid: uidSeq++ }))
-    if (!d.done?.length) d.done = ['']
-    return d
-  } catch {
-    return emptyDraft()
-  }
-}
-
-function parseArgs(text: string): { value?: Record<string, unknown>; error?: string } {
-  if (!text.trim()) return { value: {} }
-  try {
-    const v = JSON.parse(text)
-    if (!v || typeof v !== 'object' || Array.isArray(v)) return { error: 'Args must be a JSON object.' }
-    return { value: v as Record<string, unknown> }
-  } catch (e) {
-    return { error: e instanceof Error ? e.message : 'Invalid JSON' }
-  }
-}
-
-function toDraftAction(a: PlannedAction, idx: number): DraftAction {
-  const args = a.args && typeof a.args === 'object' ? a.args : {}
-  const sources: Record<string, ArgSource> = {}
-  for (const k of Object.keys(args)) sources[k] = a.arg_sources?.[k] === 'untrusted' ? 'untrusted' : 'user'
-  return {
-    uid: uidSeq++,
-    node_id: a.node_id || `n${idx + 1}`,
-    tool: a.tool || '',
-    argsText: JSON.stringify(args, null, 2),
-    arg_sources: sources,
-  }
-}
-
-const GATE_STEPS = [
-  { icon: Eye, title: 'Preview', body: 'Every side effect is shadow-run first. Nothing touches a real system yet.' },
-  { icon: ShieldCheck, title: 'Approve', body: 'Only risky items need a human. Approval binds to the exact args hash.' },
-  { icon: Zap, title: 'Execute once', body: 'An effect ledger with idempotency keys guarantees exactly-once.' },
-  { icon: RotateCcw, title: 'Undo', body: 'Reversible effects are compensated newest-first.' },
-  { icon: CheckCircle2, title: 'Verify', body: 'Done means verified against the done criteria, not just “no error”.' },
-  { icon: FileSignature, title: 'Sign', body: 'Each run produces a signed audit packet.' },
+const FALLBACK_TOOLS: ToolDef[] = [
+  { name: 'email.send', kind: 'write', reversible: false, sensitive_args: ['to', 'cc'], args: [{ name: 'to', type: 'email_list' }, { name: 'cc', type: 'email_list' }, { name: 'subject', type: 'string' }, { name: 'body', type: 'string' }] },
+  { name: 'slack.post', kind: 'write', reversible: true, sensitive_args: ['channel'], args: [{ name: 'channel', type: 'string' }, { name: 'text', type: 'string' }] },
+  { name: 'crm.update', kind: 'write', reversible: true, sensitive_args: ['record_id'], args: [{ name: 'record_id', type: 'string' }, { name: 'fields', type: 'object' }] },
+  { name: 'calendar.create_event', kind: 'write', reversible: true, sensitive_args: ['attendees'], args: [{ name: 'title', type: 'string' }, { name: 'start', type: 'datetime' }, { name: 'end', type: 'datetime' }, { name: 'attendees', type: 'email_list' }, { name: 'description', type: 'string' }] },
+  { name: 'http.get', kind: 'read', reversible: false, sensitive_args: ['url'], args: [{ name: 'url', type: 'url' }] },
+  { name: 'docs.search', kind: 'read', reversible: false, sensitive_args: [], args: [{ name: 'query', type: 'string' }, { name: 'limit', type: 'integer' }] },
 ]
 
-export function NewRun({ health }: { health: Health | undefined }) {
+interface ArgDraft {
+  name: string
+  text: string
+  json: boolean
+  source: ArgSource
+}
+
+interface ActionDraft {
+  key: number
+  node_id: string
+  tool: string
+  args: ArgDraft[]
+}
+
+type PlanOrigin = { kind: 'muse'; model?: string; dropped: number; notes?: string; taint: string[]; latencyMs?: number; effort?: string } | { kind: 'prebuilt'; title: string } | { kind: 'manual' }
+
+let keySeq = 1
+
+function toDraft(a: PlannedAction): ActionDraft {
+  return {
+    key: keySeq++,
+    node_id: a.node_id,
+    tool: a.tool,
+    args: Object.entries(a.args).map(([name, v]) => ({
+      name,
+      text: typeof v === 'string' ? v : JSON.stringify(v),
+      json: typeof v !== 'string',
+      source: a.arg_sources?.[name] ?? 'user',
+    })),
+  }
+}
+
+function fromDraft(d: ActionDraft): PlannedAction {
+  const args: Record<string, unknown> = {}
+  const arg_sources: Record<string, ArgSource> = {}
+  for (const a of d.args) {
+    if (!a.name.trim()) continue
+    let value: unknown = a.text
+    if (a.json) {
+      try {
+        value = JSON.parse(a.text)
+      } catch {
+        throw new Error(`${d.node_id}.${a.name} is not valid JSON`)
+      }
+    }
+    args[a.name.trim()] = value
+    arg_sources[a.name.trim()] = a.source
+  }
+  return { node_id: d.node_id.trim(), tool: d.tool, args, arg_sources }
+}
+
+const PLAN_PHASES = [
+  { at: 0, text: `Sending the goal, context and tool catalog to ${MODEL_NAME}` },
+  { at: 3, text: 'Drafting tool calls, constrained to the registered tools' },
+  { at: 10, text: 'Labelling every argument as user-supplied or untrusted' },
+  { at: 20, text: 'Waiting for the model response' },
+]
+
+export function NewRun() {
   useDocumentTitle('New run')
   const toast = useToast()
-  const tools = useAsync(() => api.tools(), [])
-  const toolList = useMemo(() => tools.data ?? [], [tools.data])
-  const toolMap = useMemo(() => new Map(toolList.map((t) => [t.name, t])), [toolList])
+  const scenarioParam = useSearchParam('scenario')
+  const scenarios = useScenarios()
+  const toolsQ = useAsync(() => api.tools(), [])
+  const health = useAsync(() => api.health(), [])
+  const tools = toolsQ.data?.length ? toolsQ.data : FALLBACK_TOOLS
 
-  const [draft, setDraft] = useState<Draft>(loadDraft)
+  const [mode, setMode] = useState<'scenario' | 'free'>('scenario')
+  const [scenario, setScenario] = useState<Scenario | null>(null)
+  const [goal, setGoal] = useState('')
+  const [context, setContext] = useState('')
+  const [autoLow, setAutoLow] = useState(true)
+  const [actions, setActions] = useState<ActionDraft[] | null>(null)
+  const [criteria, setCriteria] = useState('')
+  const [origin, setOrigin] = useState<PlanOrigin | null>(null)
   const [planning, setPlanning] = useState(false)
   const [planError, setPlanError] = useState<unknown>(null)
-  const [submitting, setSubmitting] = useState(false)
-  const [submitError, setSubmitError] = useState<unknown>(null)
-  const [showErrors, setShowErrors] = useState(false)
+  const [creating, setCreating] = useState(false)
+  const [createError, setCreateError] = useState<unknown>(null)
+  const abortRef = useRef<AbortController | null>(null)
+  const elapsed = useElapsed(planning)
+  const planRef = useRef<HTMLDivElement>(null)
 
-  useEffect(() => {
-    try {
-      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(draft))
-    } catch {
-      /* storage unavailable */
-    }
-  }, [draft])
-
-  const update = (patch: Partial<Draft>) => setDraft((d) => ({ ...d, ...patch }))
-  const updateAction = (uid: number, patch: Partial<DraftAction>) =>
-    setDraft((d) => ({ ...d, actions: d.actions.map((a) => (a.uid === uid ? { ...a, ...patch } : a)) }))
-
-  const addAction = () =>
-    setDraft((d) => ({
-      ...d,
-      actions: [
-        ...d.actions,
-        {
-          uid: uidSeq++,
-          node_id: `n${d.actions.length + 1}`,
-          tool: toolList.find((t) => t.kind === 'write')?.name ?? toolList[0]?.name ?? '',
-          argsText: '{\n  \n}',
-          arg_sources: {},
-        },
-      ],
-    }))
-
-  const loadSample = (id: string) => {
-    const s = SAMPLES.find((x) => x.id === id)
-    if (!s) return
+  const pick = (s: Scenario) => {
+    setScenario(s)
+    setGoal(s.goal)
+    setContext(s.context ?? '')
+    setAutoLow(s.auto_approve_low_risk ?? true)
+    setActions(null)
+    setOrigin(null)
     setPlanError(null)
-    setSubmitError(null)
-    setShowErrors(false)
-    setDraft({
-      goal: s.goal,
-      actions: s.actions.map((a, i) =>
-        toDraftAction(
-          { node_id: a.node_id, tool: resolveTool(a.toolHints, toolList), args: a.args, arg_sources: a.arg_sources },
-          i,
-        ),
-      ),
-      done: [...s.done_criteria],
-      autoApprove: !!s.auto_approve_low_risk,
-    })
+    setCreateError(null)
   }
 
-  const draftPlan = async () => {
-    if (!draft.goal.trim()) {
-      setShowErrors(true)
-      return
+  // Preselect from ?scenario=
+  const list = scenarios.data?.list
+  useEffect(() => {
+    if (!list) return
+    const s = list.find((x) => x.id === scenarioParam) ?? null
+    if (s) {
+      setMode('scenario')
+      pick(s)
     }
+  }, [list, scenarioParam])
+
+  useEffect(() => () => abortRef.current?.abort(), [])
+
+  const loadPlan = (planActions: PlannedAction[], doneCriteria: string[], o: PlanOrigin) => {
+    setActions(planActions.map(toDraft))
+    setCriteria(doneCriteria.join('\n'))
+    setOrigin(o)
+    window.setTimeout(() => planRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50)
+  }
+
+  const plan = async () => {
+    abortRef.current?.abort()
+    const ctrl = new AbortController()
+    abortRef.current = ctrl
     setPlanning(true)
     setPlanError(null)
     try {
-      const plan = await api.plan(draft.goal.trim())
-      const actions = (plan.actions ?? []).map(toDraftAction)
-      setDraft((d) => ({
-        ...d,
-        actions,
-        done: plan.done_criteria?.length ? [...plan.done_criteria] : d.done,
-      }))
-      toast.push('success', 'Plan drafted', `${actions.length} action${actions.length === 1 ? '' : 's'} proposed. Review before running.`)
+      const res = await api.plan(goal.trim(), context.trim() || undefined, ctrl.signal)
+      if (!res.actions?.length) throw new ApiError(502, 'empty_plan', 'The planner returned no usable actions for this goal.')
+      loadPlan(res.actions, res.done_criteria ?? [], {
+        kind: 'muse',
+        model: res.model,
+        dropped: res.dropped?.length ?? 0,
+        notes: res.notes,
+        taint: (res.taint_propagated ?? []).map((t) => (typeof t === 'string' ? t : [t.node_id, t.arg].filter(Boolean).join('.') || String(t.value ?? ''))),
+        latencyMs: res.latency_ms,
+        effort: res.reasoning_effort,
+      })
+      toast.push('success', 'Plan drafted', `${res.actions.length} action(s) from ${MODEL_NAME}. Review, then run the shadow run.`)
     } catch (err) {
+      if (err instanceof ApiError && err.code === 'cancelled') return
       setPlanError(err)
     } finally {
-      setPlanning(false)
+      if (abortRef.current === ctrl) {
+        setPlanning(false)
+        abortRef.current = null
+      }
     }
   }
 
-  const parsed = draft.actions.map((a) => parseArgs(a.argsText))
-  const goalError = !draft.goal.trim() ? 'Describe the goal for this run.' : null
-  const actionsError = draft.actions.length === 0 ? 'Add at least one action, draft a plan, or load a sample.' : null
-  const hasArgErrors = parsed.some((p) => p.error) || draft.actions.some((a) => !a.tool.trim() || !a.node_id.trim())
-  const nodeIds = draft.actions.map((a) => a.node_id.trim())
-  const dupIds = nodeIds.filter((id, i) => id && nodeIds.indexOf(id) !== i)
+  const usePrebuilt = () => {
+    if (!scenario) return
+    abortRef.current?.abort()
+    setPlanning(false)
+    setPlanError(null)
+    loadPlan(scenario.actions, scenario.done_criteria, { kind: 'prebuilt', title: scenario.title })
+  }
 
-  const submit = async () => {
-    setShowErrors(true)
-    if (goalError || actionsError || hasArgErrors || dupIds.length) return
-    setSubmitting(true)
-    setSubmitError(null)
+  const runNow = async () => {
+    if (!scenario) return
+    abortRef.current?.abort()
+    setPlanning(false)
+    setCreating(true)
+    setCreateError(null)
     try {
-      const actions: PlannedAction[] = draft.actions.map((a, i) => {
-        const args = parsed[i].value ?? {}
-        const arg_sources: Record<string, ArgSource> = {}
-        for (const k of Object.keys(args)) arg_sources[k] = a.arg_sources[k] ?? 'user'
-        return { node_id: a.node_id.trim(), tool: a.tool.trim(), args, arg_sources }
-      })
-      const done = draft.done.map((d) => d.trim()).filter(Boolean)
-      const run = await api.createRun({
-        goal: draft.goal.trim(),
-        actions,
-        ...(done.length ? { done_criteria: done } : {}),
-        auto_approve_low_risk: draft.autoApprove,
-      })
+      let run
+      try {
+        run = await api.runScenario(scenario.id)
+      } catch (err) {
+        if (!(err instanceof ApiError && (err.status === 404 || err.status === 405))) throw err
+        run = await api.createRun({
+          goal: scenario.goal,
+          actions: scenario.actions,
+          done_criteria: scenario.done_criteria,
+          auto_approve_low_risk: scenario.auto_approve_low_risk ?? true,
+        })
+      }
       runCache.set(run.id, run)
-      toast.push('success', 'Shadow run created', 'Nothing has been executed. Review the plan diff.')
+      const s = run.summary
+      toast.push('success', 'Shadow run complete', s ? `${s.total} actions previewed: ${s.auto_approved} auto, ${s.needs_approval} need approval, ${s.blocked} blocked.` : undefined)
       navigate(`/runs/${encodeURIComponent(run.id)}`)
     } catch (err) {
-      setSubmitError(err)
+      setCreateError(err)
+      toast.push('error', 'Shadow run failed', errorMessage(err))
     } finally {
-      setSubmitting(false)
+      setCreating(false)
     }
   }
 
-  const plannerOff = health?.llm_configured === false
-  const planUnavailable = planError instanceof ApiError && planError.status === 503
+  const manual = () => {
+    setPlanError(null)
+    loadPlan([{ node_id: 'n1', tool: 'slack.post', args: { channel: '#general', text: '' }, arg_sources: {} }], [], { kind: 'manual' })
+  }
+
+  const create = async () => {
+    if (!actions) return
+    setCreateError(null)
+    let body
+    try {
+      const planned = actions.map(fromDraft)
+      const ids = planned.map((a) => a.node_id)
+      if (ids.some((i) => !i)) throw new Error('Every action needs a node id')
+      if (new Set(ids).size !== ids.length) throw new Error('Node ids must be unique')
+      body = {
+        goal: goal.trim(),
+        actions: planned,
+        done_criteria: criteria
+          .split('\n')
+          .map((c) => c.trim())
+          .filter(Boolean),
+        auto_approve_low_risk: autoLow,
+      }
+    } catch (err) {
+      setCreateError(err)
+      return
+    }
+    setCreating(true)
+    try {
+      const run = await api.createRun(body)
+      runCache.set(run.id, run)
+      const s = run.summary
+      toast.push(
+        'success',
+        'Shadow run complete',
+        s ? `${s.total} actions previewed: ${s.auto_approved} auto, ${s.needs_approval} need approval, ${s.blocked} blocked.` : undefined,
+      )
+      navigate(`/runs/${encodeURIComponent(run.id)}`)
+    } catch (err) {
+      setCreateError(err)
+      toast.push('error', 'Shadow run failed', errorMessage(err))
+    } finally {
+      setCreating(false)
+    }
+  }
+
+  const llmOff = health.data?.llm_configured === false
+  const phase = [...PLAN_PHASES].reverse().find((p) => elapsed >= p.at) ?? PLAN_PHASES[0]
+  const slow = planning && elapsed >= 20
+  const canPlan = goal.trim().length > 0 && !planning
 
   return (
-    <div className="page">
-      <div className="page-head">
-        <div>
-          <h1 className="page-title">New run</h1>
-          <p className="page-sub">
-            Describe a goal, review the proposed actions, then shadow-run them. Nothing executes until it is approved.
-          </p>
-        </div>
-      </div>
+    <div className="page page-narrow">
+      <PageHeader
+        crumbs={[{ label: 'Runs', href: '/runs' }, { label: 'New run' }]}
+        title="New run"
+        subtitle="Describe a task. Muse drafts a plan from the registered tools; the gate shadow-runs it so you review real previews before anything is written."
+      />
 
-      <div className="split">
-        <div className="stack">
-          <section className="card" aria-labelledby="goal-h">
-            <div className="card-head">
-              <h2 id="goal-h" className="card-title">
-                Goal
-              </h2>
-              <div className="row gap-sm wrap">
-                <label className="sr-only" htmlFor="sample-select">
-                  Load sample
-                </label>
-                <select
-                  id="sample-select"
-                  className="select select-sm"
-                  value=""
-                  onChange={(e) => {
-                    loadSample(e.target.value)
-                    e.target.value = ''
-                  }}
-                >
-                  <option value="" disabled>
-                    Load sample…
-                  </option>
-                  {SAMPLES.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.label}
-                    </option>
-                  ))}
-                </select>
-                {(draft.goal || draft.actions.length > 0) && (
-                  <button
-                    type="button"
-                    className="btn btn-ghost btn-sm"
-                    onClick={() => {
-                      setDraft(emptyDraft())
-                      setPlanError(null)
-                      setSubmitError(null)
-                      setShowErrors(false)
-                    }}
-                  >
-                    Clear
-                  </button>
-                )}
-              </div>
-            </div>
-            <div className="card-body stack-sm">
-              <label htmlFor="goal" className="sr-only">
-                Goal
-              </label>
-              <textarea
-                id="goal"
-                className="textarea"
-                rows={3}
-                placeholder="e.g. Follow up with Northwind about the delayed PO-4417 shipment, update #procurement and the CRM."
-                value={draft.goal}
-                onChange={(e) => update({ goal: e.target.value })}
-                aria-invalid={showErrors && !!goalError}
-                aria-describedby={showErrors && goalError ? 'goal-err' : undefined}
-              />
-              {showErrors && goalError && (
-                <div id="goal-err" className="field-error">
-                  {goalError}
-                </div>
-              )}
-              <div className="row gap-sm wrap between">
-                <button type="button" className="btn btn-accent-soft" onClick={draftPlan} disabled={planning}>
-                  {planning ? <Spinner size={14} /> : <Sparkles size={15} aria-hidden="true" />}
-                  {planning ? 'Drafting plan…' : 'Draft plan with Muse Spark'}
-                </button>
-                <span className="muted small">
-                  {plannerOff
-                    ? 'Planner is not configured on this API. Use a sample or add actions by hand.'
-                    : `Planner: ${health?.model ?? 'Muse Spark 1.3 Contributor'}`}
-                </span>
-              </div>
-              {planError != null &&
-                (planUnavailable ? (
-                  <Callout tone="warning" title="Planner unavailable" onDismiss={() => setPlanError(null)}>
-                    The Muse Spark planner is not configured on this API (503). You can still load a sample or build the
-                    action list by hand; the gate works the same either way.
-                  </Callout>
-                ) : (
-                  <Callout tone="danger" title="Could not draft a plan" onDismiss={() => setPlanError(null)}>
-                    {errorMessage(planError)}
-                  </Callout>
-                ))}
-            </div>
-          </section>
-
-          <section className="card" aria-labelledby="actions-h">
-            <div className="card-head">
-              <h2 id="actions-h" className="card-title">
-                Actions <span className="count">{draft.actions.length}</span>
-              </h2>
-              <button type="button" className="btn btn-sm" onClick={addAction}>
-                <Plus size={14} aria-hidden="true" /> Add action
-              </button>
-            </div>
-            <div className="card-body stack-sm">
-              {tools.error != null && !tools.data && (
-                <Callout tone="warning" title="Tool catalog unavailable">
-                  {errorMessage(tools.error)} Tool names can still be typed by hand.
-                </Callout>
-              )}
-              {draft.actions.length === 0 ? (
-                <div className={`empty-inline${showErrors && actionsError ? ' empty-inline-error' : ''}`}>
-                  <p>No actions yet.</p>
-                  <p className="muted small">Draft a plan with Muse Spark, load a sample, or add actions manually.</p>
-                </div>
-              ) : (
-                draft.actions.map((a, i) => (
-                  <ActionEditor
-                    key={a.uid}
-                    index={i}
-                    action={a}
-                    tools={toolList}
-                    toolDef={toolMap.get(a.tool)}
-                    parsed={parsed[i]}
-                    duplicate={dupIds.includes(a.node_id.trim())}
-                    showErrors={showErrors}
-                    onChange={(patch) => updateAction(a.uid, patch)}
-                    onRemove={() => setDraft((d) => ({ ...d, actions: d.actions.filter((x) => x.uid !== a.uid) }))}
-                  />
-                ))
-              )}
-            </div>
-          </section>
-
-          <section className="card" aria-labelledby="done-h">
-            <div className="card-head">
-              <h2 id="done-h" className="card-title">
-                Done criteria
-              </h2>
-              <button type="button" className="btn btn-sm btn-ghost" onClick={() => update({ done: [...draft.done, ''] })}>
-                <Plus size={14} aria-hidden="true" /> Add
-              </button>
-            </div>
-            <div className="card-body stack-xs">
-              <p className="muted small">After execution, the gate verifies each criterion. A run is only done when verified.</p>
-              {draft.done.map((d, i) => (
-                <div className="row gap-xs" key={i}>
-                  <label className="sr-only" htmlFor={`done-${i}`}>
-                    Done criterion {i + 1}
-                  </label>
-                  <input
-                    id={`done-${i}`}
-                    className="input"
-                    value={d}
-                    placeholder="e.g. Slack message is posted in #procurement"
-                    onChange={(e) => update({ done: draft.done.map((x, j) => (j === i ? e.target.value : x)) })}
-                  />
-                  <button
-                    type="button"
-                    className="icon-btn"
-                    aria-label={`Remove criterion ${i + 1}`}
-                    onClick={() => update({ done: draft.done.length > 1 ? draft.done.filter((_, j) => j !== i) : [''] })}
-                  >
-                    <Trash2 size={14} />
-                  </button>
-                </div>
-              ))}
-            </div>
-          </section>
-
-          <div className="submit-bar">
-            <label className="checkbox-label">
-              <input
-                type="checkbox"
-                checked={draft.autoApprove}
-                onChange={(e) => update({ autoApprove: e.target.checked })}
-              />
-              <span>
-                Auto-approve low-risk items
-                <span className="muted small block">Medium and high risk still require a reviewer.</span>
-              </span>
-            </label>
-            <div className="row gap-sm wrap end">
-              {showErrors && (actionsError || hasArgErrors || dupIds.length > 0) && (
-                <span className="field-error" role="alert">
-                  {actionsError ??
-                    (dupIds.length ? `Duplicate node id: ${dupIds[0]}` : 'Fix the highlighted actions first.')}
-                </span>
-              )}
-              <button type="button" className="btn btn-primary" onClick={submit} disabled={submitting}>
-                {submitting ? <Spinner size={14} /> : <Eye size={15} aria-hidden="true" />}
-                {submitting ? 'Running shadow preview…' : 'Run shadow preview'}
-                {!submitting && <ArrowRight size={15} aria-hidden="true" />}
-              </button>
-            </div>
+      <Panel title="1. Task">
+        <Tabs
+          label="Run source"
+          value={mode}
+          onChange={(m) => {
+            setMode(m)
+            if (m === 'free') {
+              setScenario(null)
+              setActions(null)
+              setOrigin(null)
+            }
+          }}
+          tabs={[
+            { id: 'scenario', label: 'Demo scenario' },
+            { id: 'free', label: 'Free-form' },
+          ]}
+        />
+        {mode === 'scenario' && (
+          <div className="field">
+            <span className="field-label">Scenario</span>
+            {scenarios.initialLoading ? (
+              <Skeleton rows={5} height={36} />
+            ) : (
+              <ScenarioList scenarios={list ?? []} selectedId={scenario?.id} onSelect={pick} compact />
+            )}
           </div>
-          {submitError != null && <ErrorState error={submitError} title="Could not create the run" />}
+        )}
+        {mode === 'scenario' && scenario && (
+          <dl className="scenario-brief">
+            {scenario.pain_point && (
+              <div>
+                <dt>Pain point</dt>
+                <dd>{scenario.pain_point}</dd>
+              </div>
+            )}
+            {scenario.expected_outcome && (
+              <div>
+                <dt>Expected outcome</dt>
+                <dd>{scenario.expected_outcome}</dd>
+              </div>
+            )}
+          </dl>
+        )}
+        <label className="field">
+          <span className="field-label">Goal</span>
+          <textarea
+            className="input textarea"
+            rows={3}
+            value={goal}
+            onChange={(e) => setGoal(e.target.value)}
+            placeholder="e.g. Follow up with Acme Supplies on pricing, tell #sales, and move acct-1001 to qualified."
+          />
+        </label>
+        <label className="field">
+          <span className="field-label">
+            Context <span className="muted">optional · inbound email or document text, treated as untrusted</span>
+          </span>
+          <textarea
+            className="input textarea mono-input"
+            rows={context ? 7 : 3}
+            value={context}
+            onChange={(e) => setContext(e.target.value)}
+            placeholder="Paste an inbound email or page. Values the planner takes from here are labelled untrusted."
+          />
+        </label>
+        <label className="check">
+          <input type="checkbox" checked={autoLow} onChange={(e) => setAutoLow(e.target.checked)} />
+          <span>Auto-approve low-risk reversible writes (reads are always auto)</span>
+        </label>
+        <div className="form-actions">
+          <button type="button" className="btn btn-primary" disabled={!canPlan || llmOff} onClick={() => void plan()}>
+            {planning ? 'Planning…' : 'Plan with Muse'}
+          </button>
+          {scenario && (
+            <>
+              <button type="button" className="btn" onClick={usePrebuilt} disabled={creating}>
+                Use pre-built plan
+              </button>
+              <button type="button" className="btn" onClick={() => void runNow()} disabled={creating}>
+                {creating && !actions ? 'Running shadow run…' : 'Run scenario now'}
+              </button>
+            </>
+          )}
+          {mode === 'free' && !actions && (
+            <button type="button" className="btn btn-ghost" onClick={manual}>
+              Write actions manually
+            </button>
+          )}
+          <span className="muted small">
+            Planner: {MODEL_NAME} <span className="mono">({MODEL_ID})</span>
+            {llmOff && <span className="text-warning"> · not configured on this API</span>}
+          </span>
         </div>
 
-        <aside className="stack">
-          <section className="card" aria-labelledby="how-h">
-            <div className="card-head">
-              <h2 id="how-h" className="card-title">
-                How the gate works
-              </h2>
+        {planning && (
+          <div className="progress-block" role="status" aria-live="polite">
+            <div className="progress-bar" aria-hidden="true">
+              <span />
             </div>
-            <ol className="steps">
-              {GATE_STEPS.map((s) => (
-                <li key={s.title} className="step">
-                  <span className="step-icon" aria-hidden="true">
-                    <s.icon size={15} />
-                  </span>
-                  <div>
-                    <div className="step-title">{s.title}</div>
-                    <div className="step-body">{s.body}</div>
-                  </div>
+            <div className="progress-row">
+              <Spinner />
+              <span>{phase.text}</span>
+              <span className="mono muted">{elapsed}s</span>
+              <button type="button" className="link-btn" onClick={() => abortRef.current?.abort()}>
+                Cancel
+              </button>
+            </div>
+            <ol className="progress-steps">
+              {PLAN_PHASES.slice(0, 3).map((p) => (
+                <li key={p.at} className={cx(elapsed >= p.at && 'is-reached')}>
+                  {p.text}
                 </li>
               ))}
             </ol>
-            <div className="card-foot">
-              <Lock size={13} aria-hidden="true" />
-              <span>
-                <strong>Taint rule:</strong> untrusted data may fill a body, never a recipient, channel or target.
-              </span>
-            </div>
-          </section>
+          </div>
+        )}
+        {createError != null && !actions && <ErrorState error={createError} title="Could not start the shadow run" />}
+        {slow && scenario && (
+          <Callout
+            tone="warning"
+            title="The planner is taking longer than 20 seconds"
+            action={
+              <button type="button" className="btn btn-sm" onClick={usePrebuilt}>
+                Use pre-built plan
+              </button>
+            }
+          >
+            The scenario ships with the same plan the planner is expected to draft. It goes through the identical gate.
+          </Callout>
+        )}
+        {planError != null && (
+          <div className="stack-sm">
+            <ErrorState error={planError} title="Planning failed" onRetry={() => void plan()} />
+            {scenario ? (
+              <button type="button" className="btn" onClick={usePrebuilt}>
+                Use pre-built plan instead
+              </button>
+            ) : (
+              <button type="button" className="btn" onClick={manual}>
+                Write actions manually
+              </button>
+            )}
+          </div>
+        )}
+      </Panel>
 
-          <section className="card" aria-labelledby="tools-h">
-            <div className="card-head">
-              <h2 id="tools-h" className="card-title">
-                <BookOpen size={15} aria-hidden="true" /> Tool catalog
-              </h2>
-              {tools.data && <span className="count">{tools.data.length}</span>}
-            </div>
-            <div className="card-body">
-              {tools.loading && !tools.data ? (
-                <Skeleton rows={4} />
-              ) : tools.error != null && !tools.data ? (
-                <ErrorState error={tools.error} onRetry={tools.reload} title="Could not load tools" />
-              ) : toolList.length === 0 ? (
-                <p className="muted small">This API exposes no tools.</p>
+      {actions && (
+        <div ref={planRef}>
+          <Panel
+            title="2. Plan"
+            subtitle="Edit anything before the shadow run. Each argument carries its source: the policy blocks untrusted values in a recipient, channel or record id."
+            actions={
+              origin?.kind === 'muse' ? (
+                <Badge tone="info">Drafted by {MODEL_NAME}</Badge>
+              ) : origin?.kind === 'prebuilt' ? (
+                <Badge tone="neutral">Pre-built plan</Badge>
               ) : (
-                <ul className="tool-list">
-                  {toolList.map((t) => (
-                    <li key={t.name} className="tool-item">
-                      <div className="row gap-xs wrap">
-                        <code className="tool-name">{t.name}</code>
-                        {t.kind && <Badge tone={t.kind === 'write' ? 'accent' : 'neutral'}>{t.kind}</Badge>}
-                        {t.kind === 'write' &&
-                          (t.reversible ? <Badge tone="success">reversible</Badge> : <Badge tone="warning">irreversible</Badge>)}
-                      </div>
-                      {t.description && <div className="muted small">{t.description}</div>}
-                      {!!t.sensitive_args?.length && (
-                        <div className="small sensitive-line">
-                          <Lock size={11} aria-hidden="true" /> {t.sensitive_args.join(', ')}
-                        </div>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              )}
+                <Badge tone="neutral">Manual</Badge>
+              )
+            }
+          >
+            {origin?.kind === 'muse' && (
+              <div className="plan-meta">
+                <span className="muted small">
+                  {origin.latencyMs !== undefined ? `Planned in ${(origin.latencyMs / 1000).toFixed(1)}s` : 'Planned'}
+                  {origin.effort ? ` · reasoning effort ${origin.effort}` : ''} · <span className="mono">{origin.model ?? MODEL_ID}</span>
+                </span>
+                {origin.taint.length > 0 && (
+                  <span className="row gap-sm wrap">
+                    <span className="small">Relabelled untrusted by taint propagation:</span>
+                    {origin.taint.map((t) => (
+                      <Badge key={t} tone="warning">
+                        {t}
+                      </Badge>
+                    ))}
+                  </span>
+                )}
+                {origin.notes && <blockquote className="quote">{origin.notes}</blockquote>}
+              </div>
+            )}
+            {origin?.kind === 'muse' && origin.dropped > 0 && (
+              <Callout tone="warning" title={`${origin.dropped} drafted action(s) dropped`}>
+                They referenced tools that are not registered with the gate.
+              </Callout>
+            )}
+            <ActionEditor actions={actions} tools={tools} onChange={setActions} />
+            <label className="field">
+              <span className="field-label">
+                Done criteria <span className="muted">one per line · judged against real outputs after execution</span>
+              </span>
+              <textarea className="input textarea" rows={3} value={criteria} onChange={(e) => setCriteria(e.target.value)} />
+            </label>
+            {createError != null && <ErrorState error={createError} title="Could not start the shadow run" />}
+            <div className="form-actions">
+              <button type="button" className="btn btn-primary" disabled={creating || !goal.trim() || actions.length === 0} onClick={() => void create()}>
+                {creating ? 'Running shadow run…' : 'Run shadow run'}
+              </button>
+              <span className="muted small">Reads run for real. Writes are only previewed. Nothing is sent yet.</span>
             </div>
-          </section>
-        </aside>
-      </div>
+          </Panel>
+        </div>
+      )}
     </div>
   )
 }
 
 function ActionEditor({
-  index,
-  action,
+  actions,
   tools,
-  toolDef,
-  parsed,
-  duplicate,
-  showErrors,
   onChange,
-  onRemove,
 }: {
-  index: number
-  action: DraftAction
+  actions: ActionDraft[]
   tools: ToolDef[]
-  toolDef: ToolDef | undefined
-  parsed: { value?: Record<string, unknown>; error?: string }
-  duplicate: boolean
-  showErrors: boolean
-  onChange: (patch: Partial<DraftAction>) => void
-  onRemove: () => void
+  onChange: (a: ActionDraft[]) => void
 }) {
-  const id = `act-${action.uid}`
-  const keys = parsed.value ? Object.keys(parsed.value) : []
-  const sensitive = new Set(toolDef?.sensitive_args ?? [])
-  const knownTool = tools.some((t) => t.name === action.tool)
-  const taintedSensitive = keys.filter((k) => sensitive.has(k) && action.arg_sources[k] === 'untrusted')
-  const lines = Math.min(14, Math.max(4, action.argsText.split('\n').length + 1))
+  const toolMap = useMemo(() => new Map(tools.map((t) => [t.name, t])), [tools])
+  const update = (key: number, fn: (a: ActionDraft) => ActionDraft) => onChange(actions.map((a) => (a.key === key ? fn(a) : a)))
+
+  const addAction = () => {
+    const ids = new Set(actions.map((a) => a.node_id))
+    let n = actions.length + 1
+    while (ids.has(`n${n}`)) n++
+    const tool = tools.find((t) => t.name === 'slack.post') ?? tools[0]
+    onChange([
+      ...actions,
+      {
+        key: keySeq++,
+        node_id: `n${n}`,
+        tool: tool.name,
+        args: (tool.args ?? []).filter((a) => a.required !== false).map((a) => ({ name: a.name, text: '', json: a.type === 'object' || a.type === 'integer', source: 'user' })),
+      },
+    ])
+  }
 
   return (
-    <div className={`action-editor${parsed.error && showErrors ? ' has-error' : ''}`}>
-      <div className="action-editor-head">
-        <span className="action-index" aria-hidden="true">
-          {index + 1}
-        </span>
-        <div className="field grow">
-          <label htmlFor={`${id}-tool`} className="field-label">
-            Tool
-          </label>
-          {tools.length > 0 ? (
-            <select
-              id={`${id}-tool`}
-              className="select mono"
-              value={knownTool ? action.tool : '__custom'}
-              onChange={(e) => e.target.value !== '__custom' && onChange({ tool: e.target.value })}
-            >
-              {!knownTool && <option value="__custom">{action.tool || 'Select a tool'} (unknown)</option>}
-              {tools.map((t) => (
-                <option key={t.name} value={t.name}>
-                  {t.name}
-                  {t.kind ? ` · ${t.kind}` : ''}
-                </option>
-              ))}
-            </select>
-          ) : (
-            <input
-              id={`${id}-tool`}
-              className="input mono"
-              value={action.tool}
-              placeholder="tool.name"
-              onChange={(e) => onChange({ tool: e.target.value })}
-            />
-          )}
-        </div>
-        <div className="field node-field">
-          <label htmlFor={`${id}-node`} className="field-label">
-            Node id
-          </label>
-          <input
-            id={`${id}-node`}
-            className="input mono"
-            value={action.node_id}
-            aria-invalid={duplicate || (showErrors && !action.node_id.trim())}
-            onChange={(e) => onChange({ node_id: e.target.value })}
-          />
-        </div>
-        <button type="button" className="icon-btn action-remove" aria-label={`Remove action ${index + 1}`} onClick={onRemove}>
-          <Trash2 size={15} />
-        </button>
-      </div>
-      {toolDef?.description && <p className="muted small action-desc">{toolDef.description}</p>}
-
-      <div className="field">
-        <label htmlFor={`${id}-args`} className="field-label">
-          Args <span className="muted">(JSON)</span>
-        </label>
-        <textarea
-          id={`${id}-args`}
-          className="textarea mono code-input"
-          rows={lines}
-          spellCheck={false}
-          value={action.argsText}
-          aria-invalid={!!parsed.error}
-          aria-describedby={parsed.error ? `${id}-args-err` : undefined}
-          onChange={(e) => onChange({ argsText: e.target.value })}
-        />
-        {parsed.error && (
-          <div id={`${id}-args-err`} className="field-error">
-            {parsed.error}
-          </div>
-        )}
-      </div>
-
-      {keys.length > 0 && (
-        <div className="field">
-          <div className="field-label" id={`${id}-src`}>
-            Arg sources
-          </div>
-          <div className="source-grid" role="group" aria-labelledby={`${id}-src`}>
-            {keys.map((k) => {
-              const src = action.arg_sources[k] ?? 'user'
-              return (
-                <div key={k} className="source-row">
-                  <code className="source-key">
-                    {sensitive.has(k) && <Lock size={11} aria-label="sensitive argument" />} {k}
-                  </code>
-                  <div className="segmented" role="radiogroup" aria-label={`Source of ${k}`}>
-                    {(['user', 'untrusted'] as const).map((opt) => (
-                      <button
-                        key={opt}
-                        type="button"
-                        role="radio"
-                        aria-checked={src === opt}
-                        className={`seg${src === opt ? ` seg-on seg-${opt}` : ''}`}
-                        onClick={() => onChange({ arg_sources: { ...action.arg_sources, [k]: opt } })}
-                      >
-                        {opt === 'user' ? 'User' : 'Untrusted'}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-          {taintedSensitive.length > 0 && (
-            <div className="taint-note">
-              <Lock size={12} aria-hidden="true" /> Untrusted data in {taintedSensitive.join(', ')}. The gate will block this
-              item.
+    <div className="action-editor">
+      {actions.map((a, idx) => {
+        const def = toolMap.get(a.tool)
+        const sensitive = new Set(def?.sensitive_args ?? [])
+        const unused = (def?.args ?? []).filter((x) => !a.args.some((y) => y.name === x.name))
+        return (
+          <div key={a.key} className="ae-item">
+            <div className="ae-head">
+              <span className="ae-seq mono">{idx + 1}</span>
+              <input
+                className="input input-sm mono ae-node"
+                value={a.node_id}
+                aria-label="Node id"
+                onChange={(e) => update(a.key, (x) => ({ ...x, node_id: e.target.value }))}
+              />
+              <select
+                className="select select-sm"
+                value={a.tool}
+                aria-label="Tool"
+                onChange={(e) => update(a.key, (x) => ({ ...x, tool: e.target.value }))}
+              >
+                {tools.map((t) => (
+                  <option key={t.name} value={t.name}>
+                    {t.name}
+                  </option>
+                ))}
+              </select>
+              <span className="muted small">
+                {toolSystem(a.tool)} · {def?.kind === 'read' ? 'read' : def?.reversible ? 'reversible write' : 'irreversible write'}
+              </span>
+              <button type="button" className="link-btn ae-remove" onClick={() => onChange(actions.filter((x) => x.key !== a.key))}>
+                Remove
+              </button>
             </div>
-          )}
-        </div>
-      )}
+            <table className="ae-args">
+              <thead className="sr-only">
+                <tr>
+                  <th>Argument</th>
+                  <th>Value</th>
+                  <th>Source</th>
+                  <th>Remove</th>
+                </tr>
+              </thead>
+              <tbody>
+                {a.args.map((arg, i) => (
+                  <tr key={i}>
+                    <th scope="row" className="ae-arg-name mono">
+                      {arg.name}
+                      {sensitive.has(arg.name) && (
+                        <span className="ae-sensitive" title="Sensitive argument: an untrusted value here is blocked">
+                          sensitive
+                        </span>
+                      )}
+                    </th>
+                    <td className="ae-arg-value">
+                      {arg.text.length > 70 || arg.text.includes('\n') ? (
+                        <textarea
+                          className={cx('input textarea', arg.json && 'mono-input')}
+                          rows={Math.min(6, Math.max(2, Math.ceil(arg.text.length / 80)))}
+                          value={arg.text}
+                          aria-label={`${a.node_id} ${arg.name}`}
+                          onChange={(e) =>
+                            update(a.key, (x) => ({ ...x, args: x.args.map((y, j) => (j === i ? { ...y, text: e.target.value } : y)) }))
+                          }
+                        />
+                      ) : (
+                        <input
+                          className={cx('input input-sm', arg.json && 'mono-input')}
+                          value={arg.text}
+                          aria-label={`${a.node_id} ${arg.name}`}
+                          onChange={(e) =>
+                            update(a.key, (x) => ({ ...x, args: x.args.map((y, j) => (j === i ? { ...y, text: e.target.value } : y)) }))
+                          }
+                        />
+                      )}
+                    </td>
+                    <td className="ae-arg-source">
+                      <div className="source-toggle" role="radiogroup" aria-label={`Source of ${arg.name}`}>
+                        {(['user', 'untrusted'] as ArgSource[]).map((src) => (
+                          <button
+                            key={src}
+                            type="button"
+                            role="radio"
+                            aria-checked={arg.source === src}
+                            className={cx('source-opt', arg.source === src && `is-${src}`)}
+                            onClick={() =>
+                              update(a.key, (x) => ({ ...x, args: x.args.map((y, j) => (j === i ? { ...y, source: src } : y)) }))
+                            }
+                          >
+                            {src}
+                          </button>
+                        ))}
+                      </div>
+                    </td>
+                    <td className="ae-arg-remove">
+                      <button
+                        type="button"
+                        className="link-btn"
+                        aria-label={`Remove argument ${arg.name}`}
+                        onClick={() => update(a.key, (x) => ({ ...x, args: x.args.filter((_, j) => j !== i) }))}
+                      >
+                        Remove
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {unused.length > 0 && (
+              <div className="ae-add-arg">
+                <span className="muted small">Add argument:</span>
+                {unused.map((u) => (
+                  <button
+                    key={u.name}
+                    type="button"
+                    className="link-btn mono"
+                    onClick={() =>
+                      update(a.key, (x) => ({
+                        ...x,
+                        args: [...x.args, { name: u.name, text: '', json: u.type === 'object' || u.type === 'integer', source: 'user' }],
+                      }))
+                    }
+                  >
+                    {u.name}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )
+      })}
+      <button type="button" className="btn btn-sm" onClick={addAction}>
+        Add action
+      </button>
     </div>
   )
 }

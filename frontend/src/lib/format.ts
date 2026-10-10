@@ -5,17 +5,10 @@ export function shortSha(sha?: string | null, n = 7): string {
   return s.slice(0, n)
 }
 
-export function shortHash(hash?: string | null, n = 10): string {
+export function shortHash(hash?: string | null, n = 8): string {
   if (!hash) return '—'
   const s = String(hash)
-  const clean = s.includes(':') ? s.split(':').pop() || s : s
-  return clean.length > n ? clean.slice(0, n) : clean
-}
-
-export function shortId(id?: string | null, n = 8): string {
-  if (!id) return '—'
-  const s = String(id)
-  return s.length > n + 2 ? s.slice(0, n) : s
+  return s.length > n ? s.slice(0, n) : s
 }
 
 function toDate(value: unknown): Date | null {
@@ -40,13 +33,20 @@ export function formatDateTime(value: unknown): string {
   })
 }
 
+export function formatTime(value: unknown): string {
+  const d = toDate(value)
+  if (!d) return '—'
+  return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+}
+
 export function relativeTime(value: unknown): string {
   const d = toDate(value)
   if (!d) return '—'
   const diff = (Date.now() - d.getTime()) / 1000
   const abs = Math.abs(diff)
   const fmt = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' })
-  if (abs < 45) return 'just now'
+  if (abs < 30) return 'just now'
+  if (abs < 90) return fmt.format(-Math.round(diff), 'second')
   if (abs < 3600) return fmt.format(-Math.round(diff / 60), 'minute')
   if (abs < 86400) return fmt.format(-Math.round(diff / 3600), 'hour')
   if (abs < 86400 * 30) return fmt.format(-Math.round(diff / 86400), 'day')
@@ -54,7 +54,7 @@ export function relativeTime(value: unknown): string {
 }
 
 export function humanize(key: string): string {
-  const s = key.replace(/[_-]+/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').trim()
+  const s = key.replace(/[_.-]+/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').trim()
   return s.charAt(0).toUpperCase() + s.slice(1)
 }
 
@@ -68,29 +68,61 @@ export function pretty(value: unknown): string {
   }
 }
 
-export function flagLabel(flag: unknown): string {
-  if (typeof flag === 'string') return flag
-  if (flag && typeof flag === 'object') {
-    const f = flag as Record<string, unknown>
-    const main = f.code ?? f.type ?? f.name ?? f.kind ?? f.rule
-    const detail = f.message ?? f.reason ?? f.arg ?? f.detail
-    if (main && detail) return `${String(main)}: ${String(detail)}`
-    if (main) return String(main)
-    if (detail) return String(detail)
+export function inlineValue(value: unknown): string {
+  if (value === null || value === undefined) return '—'
+  if (typeof value === 'string') return value
+  if (Array.isArray(value) && value.every((v) => typeof v === 'string')) return value.join(', ')
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value)
   }
-  return pretty(flag)
 }
 
-export function isTaintFlag(flag: unknown): boolean {
-  const s = flagLabel(flag).toLowerCase()
-  return s.includes('taint') || s.includes('untrusted')
+export function compact(n: number | undefined | null): string {
+  if (n === undefined || n === null || Number.isNaN(n)) return '—'
+  if (Math.abs(n) < 1000) return String(Math.round(n * 10) / 10)
+  return new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(n)
 }
 
-export function pick<T = unknown>(obj: Record<string, unknown> | undefined | null, keys: string[]): T | undefined {
-  if (!obj) return undefined
-  for (const k of keys) {
-    const v = obj[k]
-    if (v !== undefined && v !== null && v !== '') return v as T
-  }
-  return undefined
+export function pct(part: number, whole: number): string {
+  if (!whole) return '0%'
+  return `${Math.round((part / whole) * 100)}%`
+}
+
+export function plural(n: number, word: string, pluralWord = `${word}s`): string {
+  return `${n} ${n === 1 ? word : pluralWord}`
+}
+
+export function dayKey(value: unknown): string | null {
+  const d = toDate(value)
+  if (!d) return null
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
+export function shortDay(day: string): string {
+  const d = new Date(`${day}T12:00:00`)
+  if (Number.isNaN(d.getTime())) return day
+  return d.toLocaleDateString(undefined, { weekday: 'short' })
+}
+
+export function longDay(day: string): string {
+  const d = new Date(`${day}T12:00:00`)
+  if (Number.isNaN(d.getTime())) return day
+  return d.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' })
+}
+
+export function downloadJson(filename: string, data: unknown) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
 }

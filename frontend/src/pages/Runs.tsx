@@ -1,103 +1,128 @@
-import { ChevronRight, Plus, RefreshCw } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api/client'
-import { StatusBadge } from '../components/Badge'
-import { StatsRow } from '../components/StatsRow'
-import { EmptyState, ErrorState, Skeleton } from '../components/ui'
-import { formatDateTime, relativeTime, shortId } from '../lib/format'
+import { ListTabs } from '../components/ListTabs'
+import { RunsTable } from '../components/RunsTable'
+import { EmptyState, ErrorState, PageHeader, Pager, Panel, Skeleton } from '../components/ui'
+import { RUN_STATUS_ORDER, runStatusMeta } from '../lib/labels'
 import { useAsync, useDocumentTitle } from '../lib/hooks'
-import { linkHandler, navigate } from '../lib/router'
+import { linkHandler } from '../lib/router'
+
+const PAGE = 50
 
 export function Runs() {
   useDocumentTitle('Runs')
-  const runs = useAsync(() => api.listRuns(50), [], 15_000)
-  const list = runs.data ?? []
+  const runs = useAsync(() => api.listRuns(200), [], 8_000)
+  const [status, setStatus] = useState('')
+  const [query, setQuery] = useState('')
+  const [page, setPage] = useState(0)
+
+  useEffect(() => setPage(0), [status, query])
+
+  const counts = useMemo(() => {
+    const out: Record<string, number> = {}
+    for (const r of runs.data ?? []) out[r.status] = (out[r.status] ?? 0) + 1
+    return out
+  }, [runs.data])
+
+  const rows = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    return (runs.data ?? []).filter(
+      (r) =>
+        (!status || (status === 'review' ? r.status === 'awaiting_approval' || r.status === 'blocked' : r.status === status)) &&
+        (!q || r.goal.toLowerCase().includes(q) || r.id.toLowerCase().includes(q)),
+    )
+  }, [runs.data, status, query])
+
+  const reviewCount = (counts.awaiting_approval ?? 0) + (counts.blocked ?? 0)
+  const filtered = !!status || !!query.trim()
 
   return (
     <div className="page">
-      <div className="page-head">
-        <div>
-          <h1 className="page-title">Runs</h1>
-          <p className="page-sub">Every goal the gate has previewed, with its approval and execution state.</p>
-        </div>
-        <div className="row gap-sm">
-          <button type="button" className="btn btn-sm btn-ghost" onClick={() => void runs.reload()} disabled={runs.loading}>
-            <RefreshCw size={14} className={runs.loading ? 'spin' : undefined} aria-hidden="true" /> Refresh
-          </button>
-          <a href="/" className="btn btn-sm btn-primary" onClick={linkHandler('/')}>
-            <Plus size={14} aria-hidden="true" /> New run
+      <PageHeader
+        title="Runs"
+        subtitle="Every task an agent sent through the gate, newest first."
+        actions={
+          <a href="/new" className="btn btn-primary" onClick={linkHandler('/new')}>
+            New run
           </a>
-        </div>
+        }
+      />
+      <ListTabs active="runs" />
+      <div className="toolbar">
+        <input
+          type="search"
+          className="input search"
+          placeholder="Search goal or run id"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          aria-label="Search runs"
+          data-search
+        />
+        <select className="select" value={status} onChange={(e) => setStatus(e.target.value)} aria-label="Filter by state">
+          <option value="">State: all ({runs.data?.length ?? 0})</option>
+          <option value="review">State: needs review ({reviewCount})</option>
+          {RUN_STATUS_ORDER.filter((s) => counts[s]).map((s) => (
+            <option key={s} value={s}>
+              State: {runStatusMeta(s).label.toLowerCase()} ({counts[s]})
+            </option>
+          ))}
+        </select>
+        {filtered && (
+          <button
+            type="button"
+            className="link-btn"
+            onClick={() => {
+              setStatus('')
+              setQuery('')
+            }}
+          >
+            Clear
+          </button>
+        )}
       </div>
-
-      <StatsRow />
-
-      <section className="card">
-        {runs.loading && !runs.data ? (
-          <div className="card-body">
-            <Skeleton rows={5} />
+      <Panel flush>
+        {runs.initialLoading ? (
+          <div className="panel-body">
+            <Skeleton rows={8} />
           </div>
         ) : runs.error != null && !runs.data ? (
-          <div className="card-body">
-            <ErrorState error={runs.error} onRetry={runs.reload} title="Could not load runs" />
+          <div className="panel-body">
+            <ErrorState error={runs.error} onRetry={() => void runs.reload()} title="Could not load runs" />
           </div>
-        ) : list.length === 0 ? (
+        ) : rows.length > 0 ? (
+          <>
+            <RunsTable runs={rows.slice(page * PAGE, (page + 1) * PAGE)} />
+            <Pager page={page} pageSize={PAGE} total={rows.length} onPage={setPage} />
+          </>
+        ) : (runs.data ?? []).length === 0 ? (
           <EmptyState
             title="No runs yet"
             action={
-              <a href="/" className="btn btn-primary" onClick={linkHandler('/')}>
-                <Plus size={14} aria-hidden="true" /> Start a run
+              <a href="/new" className="btn btn-primary" onClick={linkHandler('/new')}>
+                New run
               </a>
             }
           >
-            Create a run from a goal or a sample plan. It will be shadow-run first; nothing executes without approval.
+            A run is one agent task: shadow-run, reviewed once, executed through the ledger, verified.
           </EmptyState>
         ) : (
-          <div className="table-wrap">
-            <table className="table table-hover">
-              <thead>
-                <tr>
-                  <th scope="col">Goal</th>
-                  <th scope="col">Status</th>
-                  <th scope="col" className="num">
-                    Items
-                  </th>
-                  <th scope="col">Run</th>
-                  <th scope="col">Created</th>
-                  <th scope="col">
-                    <span className="sr-only">Open</span>
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {list.map((r) => {
-                  const href = `/runs/${encodeURIComponent(r.id)}`
-                  const count = Array.isArray(r.items) ? r.items.length : (r.item_count as number | undefined)
-                  return (
-                    <tr key={r.id} className="clickable" onClick={() => navigate(href)}>
-                      <td className="goal-cell">
-                        <a href={href} onClick={(e) => { e.stopPropagation(); linkHandler(href)(e) }} className="goal-link">
-                          {r.goal || 'Untitled run'}
-                        </a>
-                      </td>
-                      <td>
-                        <StatusBadge status={r.status} />
-                      </td>
-                      <td className="num">{count ?? '—'}</td>
-                      <td className="mono muted nowrap">{shortId(r.id)}</td>
-                      <td className="muted nowrap" title={formatDateTime(r.created_at)}>
-                        {relativeTime(r.created_at)}
-                      </td>
-                      <td className="col-chevron" aria-hidden="true">
-                        <ChevronRight size={15} />
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
+          <EmptyState
+            title="No runs match these filters"
+            action={
+              <button
+                type="button"
+                className="btn"
+                onClick={() => {
+                  setStatus('')
+                  setQuery('')
+                }}
+              >
+                Clear filters
+              </button>
+            }
+          />
         )}
-      </section>
+      </Panel>
     </div>
   )
 }
